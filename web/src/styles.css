@@ -1,0 +1,306 @@
+:root {
+  --bg: #f4f6f8;
+  --panel: #ffffff;
+  --ink: #1f2933;
+  --muted: #64707d;
+  --primary: #1d5fd0;
+  --start: #2e9e4f;
+  --exit: #d97706;
+  --blocked: #323f4b;
+  --path: #2563eb;
+  --explored: #cbd5e1;
+  --error-bg: #fef2f2;
+  --error-border: #dc2626;
+  --warn-bg: #fffbeb;
+  --warn-border: #d97706;
+  --ok-bg: #eff6ff;
+  --ok-border: #1d5fd0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+}
+
+.app {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 20px 16px 60px;
+}
+
+header h1 {
+  margin: 8px 0 4px;
+  font-size: 24px;
+}
+
+.subtitle {
+  color: var(--muted);
+  margin: 0 0 16px;
+  font-size: 14px;
+}
+
+.panel {
+  background: var(--panel);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin: 12px 0;
+  border: 1px solid #e2e8f0;
+}
+
+.panel h2 {
+  margin: 0 0 8px;
+  font-size: 17px;
+}
+
+.panel-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dim-row,
+.tool-row,
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.dim-row label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+}
+
+input[type="number"] {
+  width: 84px;
+  padding: 6px 8px;
+  border: 1px solid #94a3b8;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+input[aria-invalid="true"] {
+  border-color: var(--error-border);
+  background: var(--error-bg);
+}
+
+.btn {
+  padding: 7px 14px;
+  border: 1px solid #94a3b8;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.btn:hover {
+  background: #eef2f7;
+}
+
+.btn.active {
+  border-color: var(--primary);
+  background: #e7efff;
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.btn-primary {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+  font-size: 15px;
+  padding: 9px 20px;
+}
+
+.btn-primary:hover {
+  background: #184fab;
+}
+
+.btn-primary:disabled {
+  background: #93b3e6;
+  border-color: #93b3e6;
+  cursor: wait;
+}
+
+.plan-summary {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.sw {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border: 1px solid #0002;
+}
+
+.sw-start { background: var(--start); }
+.sw-exit { background: var(--exit); }
+.sw-blocked { background: var(--blocked); }
+.sw-path { background: #93b4f5; border-color: var(--path); }
+.sw-explored { background: var(--explored); }
+
+.dim-note {
+  color: var(--error-border);
+  font-size: 13px;
+  margin: 4px 2px;
+}
+
+/* 结果面板 */
+.panel-error {
+  background: var(--error-bg);
+  border-color: var(--error-border);
+}
+
+.panel-error ul {
+  margin: 6px 0 0;
+  padding-left: 20px;
+}
+
+.panel-error li {
+  margin: 4px 0;
+}
+
+.error-hint {
+  color: var(--muted);
+}
+
+.panel-unreachable {
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+}
+
+.panel-ok {
+  background: var(--ok-bg);
+  border-color: var(--ok-border);
+}
+
+.verdict {
+  font-size: 16px;
+  margin: 6px 0;
+}
+
+.verdict-fail {
+  color: #92400e;
+  font-weight: 700;
+}
+
+.verdict-ok {
+  color: #1e3a8a;
+}
+
+.result-line {
+  margin: 4px 0;
+}
+
+.result-note {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.coord-list {
+  max-height: 160px;
+  overflow: auto;
+  columns: 4;
+  margin: 6px 0;
+}
+
+/* 网格 */
+.grid-wrap {
+  margin-top: 14px;
+  overflow: auto;
+  background: var(--panel);
+  border-radius: 10px;
+  padding: 14px;
+  border: 1px solid #e2e8f0;
+}
+
+.grid {
+  display: grid;
+  gap: 2px;
+  /* 让格子随列数缩放，但保持可点击 */
+  width: min(100%, 720px);
+  aspect-ratio: var(--cols, 1) / var(--rows, 1);
+  margin: 0 auto;
+}
+
+.cell {
+  border: 1px solid #b8c2cf;
+  background: #fff;
+  border-radius: 3px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0;
+  min-width: 18px;
+  min-height: 18px;
+  color: #fff;
+}
+
+.cell:hover {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+.cell-start {
+  background: var(--start);
+}
+
+.cell-exit {
+  background: var(--exit);
+}
+
+.cell-blocked {
+  background: var(--blocked);
+}
+
+.cell-path {
+  background: #7ea6f2;
+  border-color: var(--path);
+  color: #0f2a63;
+}
+
+/* 起点/出口本身优先显示其本色，路线只覆盖普通格 */
+.cell-start.cell-path {
+  background: var(--start);
+  color: #fff;
+}
+
+.cell-exit.cell-path {
+  background: var(--exit);
+  color: #fff;
+}
+
+.cell-explored {
+  background: var(--explored);
+  color: #475569;
+}
+
+.cell-invalid {
+  outline: 3px solid var(--error-border);
+  outline-offset: -3px;
+}

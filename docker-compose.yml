@@ -1,0 +1,52 @@
+services:
+  api:
+    build:
+      context: ./api
+    ports:
+      # 宿主端口可用 API_PORT 覆盖
+      - "${API_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health', timeout=3).status==200 else 1)"
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 5s
+
+  web:
+    build:
+      context: ./web
+    ports:
+      # 宿主端口可用 WEB_PORT 覆盖
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:80/"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 5s
+
+  # 一次性验收服务：pytest + vitest + Playwright，全部通过后退出码为 0。
+  # 运行：docker compose build verify && docker compose run --rm verify
+  verify:
+    build:
+      context: .
+      dockerfile: verify/Dockerfile
+    command: ["bash", "/workspace/verify/verify.sh"]
+    environment:
+      API_BASE_URL: http://api:8000
+      WEB_BASE_URL: http://web:80
+      PLAYWRIGHT_BASE_URL: http://web:80
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    profiles:
+      - verify
