@@ -8,6 +8,7 @@ const VALID_PLAN: GridPlanRequest = {
   start: { row: 0, col: 0 },
   exit: { row: 2, col: 2 },
   blocked: [],
+  difficultCells: [],
 };
 
 afterEach(() => {

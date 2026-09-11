@@ -42,6 +42,44 @@ describe("applyTool", () => {
     expect(blockedSet(plan.blocked).has("1,1")).toBe(false);
   });
 
+  it("费力格：可标记、幂等，且不压在起点/出口/阻挡上", () => {
+    let plan = applyTool(emptyPlan(3, 3), "start", 0, 0);
+    plan = applyTool(plan, "exit", 0, 1);
+    plan = applyTool(plan, "block", 0, 2);
+
+    plan = applyTool(plan, "difficult", 2, 2);
+    expect(plan.difficultCells).toContainEqual({ row: 2, col: 2 });
+    // 重复点击幂等：不重复添加
+    const before = plan.difficultCells.length;
+    plan = applyTool(plan, "difficult", 2, 2);
+    expect(plan.difficultCells).toHaveLength(before);
+
+    // 不能压在起点/出口/阻挡上
+    plan = applyTool(plan, "difficult", 0, 0);
+    plan = applyTool(plan, "difficult", 0, 1);
+    plan = applyTool(plan, "difficult", 0, 2);
+    expect(plan.difficultCells).toEqual([{ row: 2, col: 2 }]);
+  });
+
+  it("在费力格上放置阻挡/起点/出口会清掉费力标记", () => {
+    let plan = applyTool(emptyPlan(3, 3), "difficult", 1, 1);
+    expect(plan.difficultCells).toContainEqual({ row: 1, col: 1 });
+    plan = applyTool(plan, "start", 1, 1);
+    expect(plan.start).toEqual({ row: 1, col: 1 });
+    expect(plan.difficultCells).toEqual([]);
+
+    let plan2 = applyTool(emptyPlan(3, 3), "difficult", 2, 2);
+    plan2 = applyTool(plan2, "block", 2, 2);
+    expect(plan2.blocked).toContainEqual({ row: 2, col: 2 });
+    expect(plan2.difficultCells).toEqual([]);
+  });
+
+  it("橡皮可擦除费力格", () => {
+    let plan = applyTool(emptyPlan(3, 3), "difficult", 1, 1);
+    plan = applyTool(plan, "erase", 1, 1);
+    expect(plan.difficultCells).toEqual([]);
+  });
+
   it("橡皮清除任意标记", () => {
     let plan = applyTool(emptyPlan(3, 3), "start", 0, 0);
     plan = applyTool(plan, "exit", 0, 1);
@@ -62,12 +100,15 @@ describe("resizePlan", () => {
     plan = applyTool(plan, "exit", 4, 4);
     plan = applyTool(plan, "block", 2, 2);
     plan = applyTool(plan, "block", 4, 0);
+    plan = applyTool(plan, "difficult", 1, 1);
+    plan = applyTool(plan, "difficult", 3, 3);
 
     const shrunk = resizePlan(plan, 3, 3);
     expect(shrunk.rows).toBe(3);
     expect(shrunk.start).toEqual({ row: 0, col: 0 });
     expect(shrunk.exit).toBeNull();
     expect(shrunk.blocked).toEqual([{ row: 2, col: 2 }]);
+    expect(shrunk.difficultCells).toEqual([{ row: 1, col: 1 }]);
   });
 });
 
@@ -95,6 +136,7 @@ describe("validateForSubmit", () => {
         start: { row: 0, col: 0 },
         exit: { row: 2, col: 2 },
         blocked: [],
+        difficultCells: [],
       });
     }
   });

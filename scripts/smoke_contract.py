@@ -75,6 +75,77 @@ check(
     [(c["row"], c["col"]) for c in body.get("path", [])]
     == [(0, 0), (0, 1), (0, 2), (1, 2), (2, 2)],
 )
+check("无费力格时 travelCost 等于步数 4", body.get("travelCost") == 4)
+
+print("== 费力通行格：更长绕行代价更低 ==")
+detour_plan = {
+    "rows": 2,
+    "cols": 4,
+    "start": {"row": 0, "col": 0},
+    "exit": {"row": 0, "col": 3},
+    "blocked": [],
+    "difficultCells": [{"row": 0, "col": 1}, {"row": 0, "col": 2}],
+}
+status, body = request(f"{API}/api/shortest-path", detour_plan)
+check("费力格请求 status=200", status == 200 and body.get("reachable") is True)
+check(
+    "选择 5 步绕底排路线（代价 5）而非 3 步直线（代价 7）",
+    body.get("steps") == 5
+    and body.get("travelCost") == 5
+    and [(c["row"], c["col"]) for c in body.get("path", [])]
+    == [(0, 0), (1, 0), (1, 1), (1, 2), (1, 3), (0, 3)],
+)
+
+print("== 费力格：等代价按上右下左稳定 ==")
+tie_plan = {
+    "rows": 3,
+    "cols": 3,
+    "start": {"row": 0, "col": 0},
+    "exit": {"row": 2, "col": 2},
+    "difficultCells": [{"row": 1, "col": 1}],
+}
+status, body = request(f"{API}/api/shortest-path", tie_plan)
+check(
+    "等代价稳定命中 右右下下，travelCost=4",
+    body.get("travelCost") == 4
+    and [(c["row"], c["col"]) for c in body.get("path", [])]
+    == [(0, 0), (0, 1), (0, 2), (1, 2), (2, 2)],
+)
+
+print("== 费力格非法：422 定位到索引且无路线 ==")
+overlap_plan = {
+    "rows": 3,
+    "cols": 3,
+    "start": {"row": 0, "col": 0},
+    "exit": {"row": 2, "col": 2},
+    "blocked": [{"row": 2, "col": 0}],
+    "difficultCells": [
+        {"row": 0, "col": 0},  # 0: 落在起点
+        {"row": 2, "col": 2},  # 1: 落在出口
+        {"row": 2, "col": 0},  # 2: 与阻挡格重合
+        {"row": 9, "col": 9},  # 3: 越界
+    ],
+}
+status, body = request(f"{API}/api/shortest-path", overlap_plan)
+detail = body.get("detail", [])
+check("费力格非法返回 422", status == 422)
+check("422 不含 path 字段", "path" not in body)
+idx_fields = {e.get("field") for e in detail}
+check(
+    "错误定位到 difficultCells.0/1/2/3",
+    {"difficultCells.0", "difficultCells.1", "difficultCells.2", "difficultCells.3"}
+    <= idx_fields,
+    str(idx_fields),
+)
+
+print("== 旧请求省略 difficultCells 字段：响应与字段兼容 ==")
+status, body = request(f"{API}/api/shortest-path", reachable_plan)
+check("旧请求仍可达且步数 4", status == 200 and body.get("steps") == 4)
+check(
+    "旧请求路线仍是 右右下下",
+    [(c["row"], c["col"]) for c in body.get("path", [])]
+    == [(0, 0), (0, 1), (0, 2), (1, 2), (2, 2)],
+)
 
 print("== 不可达契约 ==")
 unreachable_plan = {
@@ -87,6 +158,7 @@ unreachable_plan = {
 status, body = request(f"{API}/api/shortest-path", unreachable_plan)
 check("不可达时 status=200 reachable=false", status == 200 and body.get("reachable") is False)
 check("不可达不返回路线", body.get("path") == [] and body.get("steps") is None)
+check("不可达时 travelCost 为 null", body.get("travelCost") is None)
 check(
     "已探索格数为非零真实值 4",
     isinstance(body.get("exploredCount"), int) and body["exploredCount"] == 4,

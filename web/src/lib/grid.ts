@@ -13,7 +13,7 @@ export function sameCell(a: Cell | null, b: Cell | null): boolean {
 }
 
 export function emptyPlan(rows = 5, cols = 6): GridPlan {
-  return { rows, cols, start: null, exit: null, blocked: [] };
+  return { rows, cols, start: null, exit: null, blocked: [], difficultCells: [] };
 }
 
 /**把阻挡格列表转成集合，便于 O(1) 判定。 */
@@ -21,41 +21,75 @@ export function blockedSet(blocked: Cell[]): Set<string> {
   return new Set(blocked.map((c) => cellKey(c.row, c.col)));
 }
 
-/**
- * 应用一次工具点击。
- * - start / exit：放置（含从原位置移动）；
- * - block：仅当格上没有起点、出口时添加阻挡；
- * - erase：清除该格上的任何标记。
- */
-export function applyTool(plan: GridPlan, tool: Tool, r: number, c: number): GridPlan {
-  const next: GridPlan = {
-    ...plan,
-    blocked: plan.blocked.filter((b) => !(b.row === r && b.col === c)),
-  };
+/**把费力通行格列表转成集合，便于 O(1) 判定。 */
+export function difficultSet(difficultCells: Cell[]): Set<string> {
+  return new Set(difficultCells.map((c) => cellKey(c.row, c.col)));
+}
 
-  if (tool === "erase") {
-    return {
-      ...next,
-      start: sameCell(plan.start, { row: r, col: c }) ? null : next.start,
-      exit: sameCell(plan.exit, { row: r, col: c }) ? null : next.exit,
-    };
-  }
-
-  if (tool === "start") {
-    return { ...next, start: { row: r, col: c } };
-  }
-  if (tool === "exit") {
-    return { ...next, exit: { row: r, col: c } };
-  }
-  // block：不能压在起点/出口上
-  if (sameCell(plan.start, { row: r, col: c }) || sameCell(plan.exit, { row: r, col: c })) {
-    return plan;
-  }
-  return { ...next, blocked: [...next.blocked, { row: r, col: c }] };
+function withoutCell(cells: Cell[], r: number, c: number): Cell[] {
+  return cells.filter((x) => !(x.row === r && x.col === c));
 }
 
 /**
- * 调整网格尺寸：保留仍在新范围内的阻挡格与起终点（越界则丢弃）。
+ * 应用一次工具点击。
+ * - start / exit：放置（含从原位置移动），并清掉目标格上的阻挡/费力标记；
+ * - block：仅当格上没有起点、出口时添加阻挡（压在费力格上会清掉费力标记）；
+ * - difficult：仅当格上没有起点、出口、阻挡时标记费力通行格（可反复切换幂等）；
+ * - erase：清除该格上的任何标记（起点/出口/阻挡/费力）。
+ */
+export function applyTool(plan: GridPlan, tool: Tool, r: number, c: number): GridPlan {
+  const target = { row: r, col: c };
+  const onStart = sameCell(plan.start, target);
+  const onExit = sameCell(plan.exit, target);
+  const onBlocked = plan.blocked.some((b) => b.row === r && b.col === c);
+  const onDifficult = plan.difficultCells.some((d) => d.row === r && d.col === c);
+
+  if (tool === "erase") {
+    return {
+      ...plan,
+      start: onStart ? null : plan.start,
+      exit: onExit ? null : plan.exit,
+      blocked: withoutCell(plan.blocked, r, c),
+      difficultCells: withoutCell(plan.difficultCells, r, c),
+    };
+  }
+
+  // 放置起点/出口：移动位置并清掉目标格上的阻挡与费力标记
+  if (tool === "start") {
+    return {
+      ...plan,
+      start: target,
+      blocked: withoutCell(plan.blocked, r, c),
+      difficultCells: withoutCell(plan.difficultCells, r, c),
+    };
+  }
+  if (tool === "exit") {
+    return {
+      ...plan,
+      exit: target,
+      blocked: withoutCell(plan.blocked, r, c),
+      difficultCells: withoutCell(plan.difficultCells, r, c),
+    };
+  }
+
+  // block：不能压在起点/出口上；压在费力格上时改为阻挡（清掉费力标记）
+  if (tool === "block") {
+    if (onStart || onExit) return plan;
+    if (onBlocked) return plan;
+    return {
+      ...plan,
+      blocked: [...plan.blocked, target],
+      difficultCells: onDifficult ? withoutCell(plan.difficultCells, r, c) : plan.difficultCells,
+    };
+  }
+
+  // difficult：不能压在起点/出口/阻挡上；已标记则保持幂等
+  if (onStart || onExit || onBlocked || onDifficult) return plan;
+  return { ...plan, difficultCells: [...plan.difficultCells, target] };
+}
+
+/**
+ * 调整网格尺寸：保留仍在新范围内的阻挡格、费力格与起终点（越界则丢弃）。
  */
 export function resizePlan(plan: GridPlan, rows: number, cols: number): GridPlan {
   const inside = (cell: Cell | null): cell is Cell =>
@@ -66,6 +100,9 @@ export function resizePlan(plan: GridPlan, rows: number, cols: number): GridPlan
     start: inside(plan.start) ? plan.start : null,
     exit: inside(plan.exit) ? plan.exit : null,
     blocked: plan.blocked.filter((b) => b.row < rows && b.col < cols),
+    difficultCells: plan.difficultCells.filter(
+      (d) => d.row < rows && d.col < cols
+    ),
   };
 }
 
@@ -99,6 +136,7 @@ export function validateForSubmit(plan: GridPlan): SubmitValidation {
       start: plan.start,
       exit: plan.exit,
       blocked: plan.blocked,
+      difficultCells: plan.difficultCells,
     },
   };
 }

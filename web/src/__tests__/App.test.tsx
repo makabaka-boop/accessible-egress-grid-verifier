@@ -13,6 +13,7 @@ function okResponse(overrides: Record<string, unknown> = {}) {
     ],
     steps: 2,
     distanceMeters: 1.0,
+    travelCost: 2,
     exploredCount: 3,
     explored: [
       { row: 0, col: 0 },
@@ -154,5 +155,103 @@ describe("App 编辑器交互", () => {
     fireEvent.change(rowsInput, { target: { value: "1" } });
     fireEvent.click(screen.getByRole("button", { name: "应用尺寸" }));
     expect(screen.getByText(/行数必须是 2 至 40 之间的整数/)).toBeTruthy();
+  });
+
+  it("费力格：标记后渲染费力样式、请求带 difficultCells、面板显示通行代价", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify(
+          okResponse({
+            path: [
+              { row: 0, col: 0 },
+              { row: 1, col: 0 },
+              { row: 1, col: 1 },
+            ],
+            steps: 2,
+            distanceMeters: 1.0,
+            travelCost: 4,
+          })
+        ),
+        { status: 200 }
+      )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+
+    fireEvent.click(screen.getByTestId("cell-0-0")); // 起点
+    fireEvent.click(screen.getByRole("button", { name: /② 出口/ }));
+    fireEvent.click(screen.getByTestId("cell-1-1")); // 出口
+    fireEvent.click(screen.getByRole("button", { name: /④ 费力/ }));
+    fireEvent.click(screen.getByTestId("cell-0-1")); // 标记费力格
+
+    expect(screen.getByTestId("cell-0-1").className).toContain("cell-difficult");
+
+    fireEvent.click(screen.getByTestId("verify-button"));
+    await waitFor(() => expect(screen.getByTestId("result-ok")).toBeTruthy());
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.difficultCells).toEqual([{ row: 0, col: 1 }]);
+    expect(screen.getByTestId("result-cost").textContent).toBe("4");
+    expect(screen.getByTestId("result-steps").textContent).toBe("2");
+  });
+
+  it("费力格非法重叠 422：清空旧轨迹并按 difficultCells 索引高亮对应格", async () => {
+    // 先成功一次，画布上有路线
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(okResponse()), { status: 200 }))
+      // 服务端判定已提交的费力格索引 0 与阻挡重合，返回定位到索引的字段错误
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            detail: [
+              { field: "difficultCells.0", message: "费力通行格 (2,2) 不能与阻挡格重合" },
+            ],
+          }),
+          { status: 422 }
+        )
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    fireEvent.click(screen.getByTestId("cell-0-0")); // 起点
+    fireEvent.click(screen.getByRole("button", { name: /② 出口/ }));
+    fireEvent.click(screen.getByTestId("cell-1-1")); // 出口
+    fireEvent.click(screen.getByTestId("verify-button"));
+    await waitFor(() => expect(screen.getByTestId("result-ok")).toBeTruthy());
+
+    // 标记一个费力格（这会立即清空旧结果，画布不再有路线）
+    fireEvent.click(screen.getByRole("button", { name: /④ 费力/ }));
+    fireEvent.click(screen.getByTestId("cell-2-2"));
+    expect(document.querySelectorAll(".cell-path").length).toBe(0);
+    expect(screen.queryByTestId("result-ok")).toBeNull();
+    expect(screen.getByTestId("cell-2-2").className).toContain("cell-difficult");
+
+    fireEvent.click(screen.getByTestId("verify-button"));
+    await waitFor(() => expect(screen.getByTestId("error-panel")).toBeTruthy());
+    expect(screen.getByText(/不能与阻挡格重合/)).toBeTruthy();
+    // 422 不返回路线，画布依旧无路线
+    expect(document.querySelectorAll(".cell-path").length).toBe(0);
+    // difficultCells.0 对应的费力格 (2,2) 被高亮
+    expect(screen.getByTestId("cell-2-2").className).toContain("cell-invalid");
+  });
+
+  it("编辑费力格也会立即作废旧结果", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(JSON.stringify(okResponse()), { status: 200 }))
+    );
+    render(<App />);
+    fireEvent.click(screen.getByTestId("cell-0-0"));
+    fireEvent.click(screen.getByRole("button", { name: /② 出口/ }));
+    fireEvent.click(screen.getByTestId("cell-1-1"));
+    fireEvent.click(screen.getByTestId("verify-button"));
+    await waitFor(() => expect(screen.getByTestId("result-ok")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: /④ 费力/ }));
+    fireEvent.click(screen.getByTestId("cell-2-2"));
+    expect(document.querySelectorAll(".cell-path").length).toBe(0);
+    expect(screen.queryByTestId("result-ok")).toBeNull();
+    expect(screen.getByTestId("cell-2-2").className).toContain("cell-difficult");
   });
 });

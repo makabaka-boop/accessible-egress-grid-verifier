@@ -13,12 +13,12 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from .models import GridPlan
-from .pathfinding import CELL_SIZE_METERS, find_shortest_path
+from .pathfinding import CELL_SIZE_METERS, find_shortest_path, path_travel_cost
 from .validation import SemanticError, validate_semantics
 
 app = FastAPI(
     title="社区礼堂轮椅疏散路线核验 API",
-    version="1.0.0",
+    version="1.1.0",
 )
 
 _FIELD_LABELS = {
@@ -27,6 +27,7 @@ _FIELD_LABELS = {
     "start": "起点",
     "exit": "出口",
     "blocked": "阻挡格",
+    "difficultCells": "费力通行格",
 }
 
 
@@ -115,6 +116,7 @@ async def shortest_path(request: Request) -> dict[str, Any]:
     # 语义校验失败时由 SemanticError 异常处理器统一返回 422
     validate_semantics(plan)
 
+    difficult = {cell.as_tuple() for cell in (plan.difficult_cells or [])}
     path, explored_order, explored_count = find_shortest_path(plan)
 
     def serialize(coord: tuple[int, int]) -> dict[str, int]:
@@ -127,6 +129,7 @@ async def shortest_path(request: Request) -> dict[str, Any]:
             "path": [],
             "steps": None,
             "distanceMeters": None,
+            "travelCost": None,
             "exploredCount": explored_count,
             "explored": [serialize(c) for c in explored_order],
         }
@@ -138,6 +141,7 @@ async def shortest_path(request: Request) -> dict[str, Any]:
         "path": [serialize(c) for c in path],
         "steps": steps,
         "distanceMeters": round(steps * CELL_SIZE_METERS, 4),
+        "travelCost": path_travel_cost(path, difficult),
         "exploredCount": explored_count,
         "explored": [serialize(c) for c in explored_order],
     }

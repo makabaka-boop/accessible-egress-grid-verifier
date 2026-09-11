@@ -18,6 +18,7 @@ const TOOLS: { id: Tool; label: string; hint: string }[] = [
   { id: "start", label: "① 起点", hint: "点击格放置起点" },
   { id: "exit", label: "② 出口", hint: "点击格放置出口" },
   { id: "block", label: "③ 阻挡", hint: "点击格放置临时隔断" },
+  { id: "difficult", label: "④ 费力", hint: "点击格标记费力通行格（进入代价为 3）" },
   { id: "erase", label: "橡皮", hint: "点击格清除标记" },
 ];
 
@@ -102,14 +103,25 @@ export default function App() {
     setErrors([]);
   }
 
-  // 字段级错误对应的网格格：起点/出口问题高亮对应坐标。
+  // 字段级错误对应的网格格：起点/出口问题高亮对应坐标；
+  // difficultCells.<索引> 错误高亮费力列表中的对应格。
   const invalidCells = useMemo(() => {
     const set = new Set<string>();
-    const fields = new Set(errors.map((e) => e.field));
-    if (fields.has("start") && plan.start) set.add(cellKey(plan.start.row, plan.start.col));
-    if (fields.has("exit") && plan.exit) set.add(cellKey(plan.exit.row, plan.exit.col));
+    for (const err of errors) {
+      if (err.field === "start" && plan.start) {
+        set.add(cellKey(plan.start.row, plan.start.col));
+      } else if (err.field === "exit" && plan.exit) {
+        set.add(cellKey(plan.exit.row, plan.exit.col));
+      } else {
+        const match = /^difficultCells\.(\d+)$/.exec(err.field);
+        if (match) {
+          const cell = plan.difficultCells[Number(match[1])];
+          if (cell) set.add(cellKey(cell.row, cell.col));
+        }
+      }
+    }
     return set;
-  }, [errors, plan.start, plan.exit]);
+  }, [errors, plan.start, plan.exit, plan.difficultCells]);
 
   const dimError = errors.some((e) => e.field === "rows" || e.field === "cols");
 
@@ -118,7 +130,8 @@ export default function App() {
       <header>
         <h1>社区礼堂轮椅疏散路线核验器</h1>
         <p className="subtitle">
-          方格边长 0.5 米 · 仅上下左右移动 · 多解时按「上 → 右 → 下 → 左」唯一确定
+          方格边长 0.5 米 · 仅上下左右移动 · 普通移动代价 1、进入费力格代价 3 ·
+          同代价时步数更少优先，再按「上 → 右 → 下 → 左」唯一确定
         </p>
       </header>
 
@@ -175,6 +188,7 @@ export default function App() {
           <span className="legend-item"><i className="sw sw-start" />起点</span>
           <span className="legend-item"><i className="sw sw-exit" />出口</span>
           <span className="legend-item"><i className="sw sw-blocked" />阻挡（临时隔断）</span>
+          <span className="legend-item"><i className="sw sw-difficult" />费力通行格（+3）</span>
           <span className="legend-item"><i className="sw sw-path" />疏散路线</span>
           <span className="legend-item"><i className="sw sw-explored" />已探索（不可达时）</span>
         </div>
@@ -193,7 +207,7 @@ export default function App() {
             当前：{plan.rows} 行 × {plan.cols} 列 ·{" "}
             起点 {plan.start ? `(${plan.start.row},${plan.start.col})` : "未设置"} ·{" "}
             出口 {plan.exit ? `(${plan.exit.row},${plan.exit.col})` : "未设置"} ·{" "}
-            阻挡 {plan.blocked.length} 格
+            阻挡 {plan.blocked.length} 格 · 费力 {plan.difficultCells.length} 格
           </span>
         </div>
       </section>
@@ -215,6 +229,7 @@ export default function App() {
           start={plan.start}
           exit={plan.exit}
           blocked={plan.blocked}
+          difficultCells={plan.difficultCells}
           result={result}
           activeTool={tool}
           invalidCells={invalidCells}

@@ -25,17 +25,24 @@ export function ResultPanel({ result }: ResultPanelProps) {
 
   return (
     <section className="panel panel-ok" aria-live="polite" data-testid="result-ok">
-      <h2>找到唯一最短疏散路线</h2>
-      <p className="verdict verdict-ok">
-        步数（不含起点）：<strong data-testid="result-steps">{result.steps}</strong>
-      </p>
+      <h2>找到累计通行代价最低的疏散路线</h2>
+      <div className="result-stats">
+        <p className="result-line">
+          步数（不含起点）：<strong data-testid="result-steps">{result.steps}</strong>
+        </p>
+        <p className="result-line">
+          疏散距离：
+          <strong data-testid="result-distance">{result.distanceMeters}</strong> 米
+          <span className="result-note">（每格 0.5 米）</span>
+        </p>
+        <p className="result-line">
+          累计通行代价：
+          <strong data-testid="result-cost">{result.travelCost}</strong>
+          <span className="result-note">（普通移动 1，进入费力格 3）</span>
+        </p>
+      </div>
       <p className="result-line">
-        疏散距离：
-        <strong data-testid="result-distance">{result.distanceMeters}</strong> 米
-        <span className="result-note">（每格 0.5 米）</span>
-      </p>
-      <p className="result-line">
-        BFS 已探索格数：<strong>{result.exploredCount}</strong>
+        加权搜索已探索格数：<strong>{result.exploredCount}</strong>
       </p>
       <details>
         <summary>有序坐标（起点 → 出口）</summary>

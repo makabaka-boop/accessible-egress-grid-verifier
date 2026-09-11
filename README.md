@@ -1,26 +1,29 @@
 # 社区礼堂轮椅疏散路线核验器
 
 一个全栈核验工具：核验员在 React 网格编辑器中绘制改造中礼堂的方格平面
-（2–40 行 × 2–40 列，恰好一个起点、一个出口、若干阻挡格），前端将结构化
-平面提交给 FastAPI，后端自行实现四方向 BFS 最短路径搜索，返回**唯一**的
-有序坐标路线与步数。
+（2–40 行 × 2–40 列，恰好一个起点、一个出口、若干阻挡格，可选若干“费力
+通行格”），前端将结构化平面提交给 FastAPI，后端自行实现四方向搜索，返回
+**唯一**的有序坐标路线、步数与累计通行代价。
 
 - 每格边长 **0.5 米**；**起点计入路线但不计步**。
 - 只能向上、下、左、右进入**非阻挡格**，不能斜向移动。
-- 存在多条等长最短路线时，相邻格扩展顺序固定为
-  **上 → 右 → 下 → 左**，由 BFS 入队顺序保证结果唯一。
+- **普通移动代价为 1，进入费力通行格的代价为 3**（起点不付费）。
+- 优化目标依次为：**累计通行代价最低 → 步数更少 → 按 上 → 右 → 下 → 左
+  扩展更早**，三者共同保证结果唯一。
+- 不提交费力格（或空列表）时退化为原四方向 BFS：按最短步数选路，
+  等长路线由 **上 → 右 → 下 → 左** 的入队顺序唯一确定，结果与旧版一致。
 - 出口不可达时明确返回“不可达”，给出真实的已探索格数（≥1），
   且前端画布不绘制任何路线。
 
 ## 目录结构
 
 ```
-api/                 FastAPI + Pydantic + 自研 BFS
+api/                 FastAPI + Pydantic + 自研搜索
   app/main.py           路由与统一的字段级错误响应
-  app/models.py         请求模型（结构校验）
-  app/validation.py     语义校验（越界/重合/阻挡）
-  app/pathfinding.py    四方向 BFS（上→右→下→左）
-  tests/test_api.py     pytest（22 个用例）
+  app/models.py         请求模型（结构校验，difficultCells 为可选别名）
+  app/validation.py     语义校验（越界/重合/阻挡/费力格）
+  app/pathfinding.py    BFS（可达性/无费力格）+ 确定性加权搜索（费力格）
+  tests/test_api.py     pytest（34 个用例）
 web/                 React + TypeScript + Vite
   src/lib/grid.ts       纯函数：网格编辑、提交前校验（vitest 覆盖）
   src/lib/api.ts        API 客户端：422 转字段级错误
@@ -99,6 +102,7 @@ WEB_PORT=8080 API_PORT=8000 bash scripts/verify-local.sh
 | `start`   | `{row, col}`     | 0 基坐标，必须在网格内，不能被阻挡                           |
 | `exit`    | `{row, col}`     | 0 基坐标，必须在网格内，不能被阻挡、不能与起点重合           |
 | `blocked` | `[{row, col}, …]` | 可选；坐标必须在网格内、不得重复                             |
+| `difficultCells` | `[{row, col}, …]` | 可选；费力通行格，进入代价为 3。坐标必须在网格内、不得重复，且不能落在起点、出口或阻挡格上；省略与 `[]` 等价 |
 
 多余字段一律拒绝（`extra_forbid`）。坐标均为 **0 基 [row, col]**。
 
@@ -110,7 +114,8 @@ WEB_PORT=8080 API_PORT=8000 bash scripts/verify-local.sh
   "cols": 3,
   "start": { "row": 0, "col": 0 },
   "exit": { "row": 2, "col": 2 },
-  "blocked": [{ "row": 0, "col": 1 }]
+  "blocked": [{ "row": 0, "col": 1 }],
+  "difficultCells": [{ "row": 2, "col": 1 }]
 }
 ```
 
@@ -127,13 +132,16 @@ WEB_PORT=8080 API_PORT=8000 bash scripts/verify-local.sh
   ],
   "steps": 4,
   "distanceMeters": 2.0,
+  "travelCost": 4,
   "exploredCount": 9,
   "explored": [ "…BFS 实际访问顺序的坐标…" ]
 }
 ```
 
 `steps = path.length - 1`（起点计入路线但不计步），
-`distanceMeters = steps × 0.5`。
+`distanceMeters = steps × 0.5`，
+`travelCost` 为累计通行代价：起点不计，进入普通格 1、进入费力格 3；
+不含费力格时 `travelCost == steps`。
 
 #### 成功响应 `200` —— 不可达
 
@@ -144,6 +152,7 @@ WEB_PORT=8080 API_PORT=8000 bash scripts/verify-local.sh
   "path": [],
   "steps": null,
   "distanceMeters": null,
+  "travelCost": null,
   "exploredCount": 1,
   "explored": [{ "row": 1, "col": 1 }]
 }
@@ -154,18 +163,20 @@ WEB_PORT=8080 API_PORT=8000 bash scripts/verify-local.sh
 #### 失败响应 `422` —— 整次请求失败，不返回任何路线
 
 行列不符、坐标越界、起终点重合、起点/出口被阻挡、阻挡格重复、
-类型错误、缺字段、多余字段等，统一返回：
+费力格越界/重复/落在起点·出口·阻挡格上、类型错误、缺字段、多余字段等，
+统一返回：
 
 ```json
 {
   "detail": [
     { "field": "start", "message": "起点位于阻挡格上，疏散路线无法开始" },
-    { "field": "exit",  "message": "出口与起点不能是同一个格" }
+    { "field": "difficultCells.0",  "message": "费力通行格不能标记在起点上" }
   ]
 }
 ```
 
-- `field` 为字段路径，如 `rows`、`blocked.2.col`，可直接定位到表单项或格；
+- `field` 为字段路径，如 `rows`、`blocked.2.col`、`difficultCells.0`，
+  可直接定位到表单项或列表中的具体格；
 - 多条错误会一次性全部返回；
 - 响应中**不含** `path`，前端会清空画布，绝不残留上一次成功路线。
 
@@ -173,12 +184,16 @@ WEB_PORT=8080 API_PORT=8000 bash scripts/verify-local.sh
 
 ## 四、前端行为约定（核验员视角）
 
-1. 选择工具（① 起点 / ② 出口 / ③ 阻挡 / 橡皮）后点击格放置；
-   起点、出口各只有一个，再次放置即移动；阻挡不能压在起终点上。
+1. 选择工具（① 起点 / ② 出口 / ③ 阻挡 / ④ 费力 / 橡皮）后点击格放置；
+   起点、出口各只有一个，再次放置即移动；阻挡不能压在起终点上，费力格
+   不能压在起点、出口或阻挡格上；橡皮可擦除任意标记。
 2. 点「核验最短疏散路线」后：
-   - **成功**：蓝色绘制唯一最短路线，显示步数与米数，可展开有序坐标；
+   - **成功**：蓝色绘制累计通行代价最低的唯一路线（琥珀描边标出路线经过的
+     费力格），结果面板显示**步数、米数、通行代价**，可展开有序坐标；
    - **不可达**：琥珀色面板明确显示“不可达”与真实已探索格数，
      灰色标出实际探索范围，画布上没有任何路线；
-   - **请求失败**：红色面板按字段列出可操作的中文错误；
+   - **请求失败**：红色面板按字段列出可操作的中文错误（费力格问题定位到
+     `difficultCells.<索引>` 并高亮对应格）；
+   - **网络失败**：保持原有“无法连接核验服务”的提示行为。
 3. 任何一次对平面的编辑（含改尺寸、放格、擦除）都会立即作废上一次结果，
    画布不残留旧轨迹。

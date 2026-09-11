@@ -31,3 +31,8 @@ class GridPlan(BaseModel):
     start: Cell
     exit: Cell
     blocked: list[Cell] = Field(default_factory=list)
+    # 省略（None）与空列表等价：无费力格时退化为原四方向 BFS。
+    # 使用别名 difficultCells 作为对外 JSON 字段名。
+    difficult_cells: list[Cell] | None = Field(
+        default=None, alias="difficultCells", description="费力通行格（进入代价为 3）"
+    )
