@@ -254,4 +254,77 @@ describe("App 编辑器交互", () => {
     expect(screen.queryByTestId("result-ok")).toBeNull();
     expect(screen.getByTestId("cell-2-2").className).toContain("cell-difficult");
   });
+
+  it("核验在途时编辑平面，编辑前发出的响应返回后不再绘制旧路线", async () => {
+    let resolveFetch: (r: Response) => void = () => {};
+    const fetchMock = vi.fn().mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+
+    fireEvent.click(screen.getByTestId("cell-0-0")); // 起点
+    fireEvent.click(screen.getByRole("button", { name: /② 出口/ }));
+    fireEvent.click(screen.getByTestId("cell-1-1")); // 出口
+    fireEvent.click(screen.getByTestId("verify-button"));
+    expect(fetchMock).toHaveBeenCalledOnce();
+
+    // 请求在途期间增删费力格：结果立即作废
+    fireEvent.click(screen.getByRole("button", { name: /④ 费力/ }));
+    fireEvent.click(screen.getByTestId("cell-2-2"));
+
+    // 编辑前发出的请求此时才返回旧平面的路线
+    resolveFetch(new Response(JSON.stringify(okResponse()), { status: 200 }));
+
+    // 等响应处理完毕（加载态结束），过期结果必须被丢弃
+    await waitFor(() =>
+      expect(screen.getByTestId("verify-button").textContent).toBe(
+        "核验最短疏散路线"
+      )
+    );
+    expect(screen.queryByTestId("result-ok")).toBeNull();
+    expect(document.querySelectorAll(".cell-path").length).toBe(0);
+    expect(screen.queryByTestId("error-panel")).toBeNull();
+  });
+
+  it("核验在途时编辑平面，过期的 422 响应也不再弹出字段错误", async () => {
+    let resolveFetch: (r: Response) => void = () => {};
+    const fetchMock = vi.fn().mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+
+    fireEvent.click(screen.getByTestId("cell-0-0"));
+    fireEvent.click(screen.getByRole("button", { name: /② 出口/ }));
+    fireEvent.click(screen.getByTestId("cell-1-1"));
+    fireEvent.click(screen.getByTestId("verify-button"));
+
+    fireEvent.click(screen.getByRole("button", { name: /③ 阻挡/ }));
+    fireEvent.click(screen.getByTestId("cell-3-3"));
+
+    resolveFetch(
+      new Response(
+        JSON.stringify({
+          detail: [{ field: "exit", message: "出口与起点不能是同一个格" }],
+        }),
+        { status: 422 }
+      )
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("verify-button").textContent).toBe(
+        "核验最短疏散路线"
+      )
+    );
+    expect(screen.queryByTestId("error-panel")).toBeNull();
+    expect(screen.queryByTestId("result-ok")).toBeNull();
+    expect(document.querySelectorAll(".cell-path").length).toBe(0);
+  });
 });

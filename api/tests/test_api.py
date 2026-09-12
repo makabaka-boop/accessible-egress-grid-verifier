@@ -276,6 +276,65 @@ def test_empty_difficult_cells_list_is_accepted():
     assert res.json()["travelCost"] == 4
 
 
+def test_null_difficult_cells_rejected():
+    """显式 null 不是合法的费力格列表：只允许省略或数组。"""
+    plan = base_plan(difficultCells=None)
+    res = post_plan(plan)
+    assert res.status_code == 422
+    assert "path" not in res.json()
+    detail = res.json()["detail"]
+    assert any(
+        e["field"] == "difficultCells" and "数组" in e["message"] for e in detail
+    )
+
+
+# ---------- 类型边界：整值小数/布尔不得静默转换 ----------
+
+def test_integral_float_rows_rejected():
+    """rows=3.0 这类整值小数必须拒绝，而不是静默转成 3。"""
+    res = post_plan(base_plan(rows=3.0))
+    assert res.status_code == 422
+    assert "path" not in res.json()
+    detail = res.json()["detail"]
+    assert any(e["field"] == "rows" and "整数" in e["message"] for e in detail)
+
+
+def test_integral_float_cols_rejected():
+    res = post_plan(base_plan(cols=3.0))
+    assert res.status_code == 422
+    assert any(e["field"] == "cols" for e in res.json()["detail"])
+
+
+def test_integral_float_coordinate_rejected():
+    plan = base_plan(start={"row": 0.0, "col": 0}, exit={"row": 2, "col": 2.0})
+    res = post_plan(plan)
+    assert res.status_code == 422
+    fields = {e["field"] for e in res.json()["detail"]}
+    assert "start.row" in fields
+    assert "exit.col" in fields
+
+
+def test_integral_float_in_list_coordinate_rejected():
+    plan = base_plan(
+        blocked=[{"row": 1.0, "col": 1}],
+        difficultCells=[{"row": 2, "col": 1.0}],
+    )
+    res = post_plan(plan)
+    assert res.status_code == 422
+    fields = {e["field"] for e in res.json()["detail"]}
+    assert "blocked.0.row" in fields
+    assert "difficultCells.0.col" in fields
+
+
+def test_bool_not_accepted_as_integer():
+    res = post_plan(base_plan(rows=True))
+    assert res.status_code == 422
+    assert any(
+        e["field"] == "rows" and "整数" in e["message"]
+        for e in res.json()["detail"]
+    )
+
+
 # ---------- 不可达 ----------
 
 def test_unreachable_returns_real_explored_count_and_no_path():

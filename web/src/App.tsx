@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { FieldError, GridPlan, PathResult, Tool } from "./types";
 import {
   MAX_DIM,
@@ -35,9 +35,14 @@ export default function App() {
   const [errors, setErrors] = useState<FieldError[]>([]);
   const [result, setResult] = useState<PathResult | null>(null);
   const [loading, setLoading] = useState(false);
+  // 平面版本：任何编辑都会自增，用于识别并丢弃编辑前发出的过期响应；
+  // 请求序号：区分先后发起的核验，避免旧请求干扰新请求的加载态。
+  const planVersionRef = useRef(0);
+  const requestSeqRef = useRef(0);
 
   // 任何对平面的编辑都会作废上一次的结果，画布不残留旧路线。
   function mutatePlan(next: GridPlan) {
+    planVersionRef.current += 1;
     setPlan(next);
     setResult(null);
     setErrors([]);
@@ -80,21 +85,31 @@ export default function App() {
     }
     setErrors([]);
     setLoading(true);
+    const seq = ++requestSeqRef.current;
+    const versionAtSend = planVersionRef.current;
+    // 等待期间平面被编辑（或发起了更新的请求）时，本次响应即为过期数据
+    const isStale = () =>
+      seq !== requestSeqRef.current || planVersionRef.current !== versionAtSend;
     try {
       const apiResult = await findShortestPath(validation.request);
+      if (isStale()) return; // 编辑前的请求返回：丢弃，保持结果清空
       setResult(apiResult);
     } catch (err) {
+      if (isStale()) return;
       if (err instanceof ApiError) {
         setErrors(err.fieldErrors);
       } else {
         setErrors([{ field: "__network__", message: "发生未知错误，请重试" }]);
       }
     } finally {
-      setLoading(false);
+      if (seq === requestSeqRef.current) {
+        setLoading(false);
+      }
     }
   }
 
   function handleReset() {
+    planVersionRef.current += 1;
     setPlan(emptyPlan());
     setRowsInput("5");
     setColsInput("6");

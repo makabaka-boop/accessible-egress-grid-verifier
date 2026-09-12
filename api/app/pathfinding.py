@@ -177,7 +177,7 @@ def find_shortest_path(
     start = plan.start.as_tuple()
     target = plan.exit.as_tuple()
     blocked = {cell.as_tuple() for cell in plan.blocked}
-    difficult = {cell.as_tuple() for cell in (plan.difficult_cells or [])}
+    difficult = {cell.as_tuple() for cell in plan.difficult_cells}
 
     # 可达性与已探索范围由忽略权重的 BFS 决定（费力格始终可通行）
     path, explored_order = _find_unweighted(plan, start, target, blocked)

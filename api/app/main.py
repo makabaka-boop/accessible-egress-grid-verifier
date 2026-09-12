@@ -116,7 +116,7 @@ async def shortest_path(request: Request) -> dict[str, Any]:
     # 语义校验失败时由 SemanticError 异常处理器统一返回 422
     validate_semantics(plan)
 
-    difficult = {cell.as_tuple() for cell in (plan.difficult_cells or [])}
+    difficult = {cell.as_tuple() for cell in plan.difficult_cells}
     path, explored_order, explored_count = find_shortest_path(plan)
 
     def serialize(coord: tuple[int, int]) -> dict[str, int]:

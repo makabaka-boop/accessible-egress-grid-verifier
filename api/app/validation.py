@@ -94,7 +94,7 @@ def validate_semantics(plan: GridPlan) -> None:
     blocked_set = set(c for c in blocked_coords if _in_bounds(plan, c))
 
     # ---- 费力格：越界/重复/与起点、出口、阻挡重叠，错误定位到具体索引 ----
-    difficult = plan.difficult_cells or []
+    difficult = plan.difficult_cells
     difficult_seen: set[tuple[int, int]] = set()
     for index, cell in enumerate(difficult):
         field = f"{DIFFICULT_FIELD}.{index}"

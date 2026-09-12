@@ -42,7 +42,8 @@ export function ResultPanel({ result }: ResultPanelProps) {
         </p>
       </div>
       <p className="result-line">
-        加权搜索已探索格数：<strong>{result.exploredCount}</strong>
+        已探索格数：<strong>{result.exploredCount}</strong>
+        <span className="result-note">（不计权重的可达性搜索实际访问格数）</span>
       </p>
       <details>
         <summary>有序坐标（起点 → 出口）</summary>
