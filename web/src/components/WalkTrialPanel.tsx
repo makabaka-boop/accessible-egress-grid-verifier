@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import type { Cell, FieldError, WalkTrialProgress } from "../types";
-import { ApiError, advanceWalkTrial, createWalkTrial } from "../lib/api";
+import { ApiError, advanceWalkTrial, createWalkTrial, undoWalkTrial } from "../lib/api";
 
 interface WalkTrialPanelProps {
   /**成功核验返回的不可变路线快照（起点 → 出口）。 */
@@ -29,7 +29,9 @@ function segmentSummary(p: WalkTrialProgress): string {
  * 整数）：设定后每段按“秒数大于目标 → 超时，否则达标”逐格判定，面板
  * 即时汇总两类段数与对应坐标；留空则不判定，行为与旧版一致。
  * 之后逐格输入“到达下一格所用秒数”并确认；面板持续显示下一坐标、累计
- * 时间与完成进度，到达出口后锁定总耗时。
+ * 时间与完成进度，到达出口后锁定总耗时。输错某段秒数时可「撤回上一段」
+ * （进行中与已完成状态都可用），回退检查点后按正确秒数重新确认，
+ * 不必丢弃已核验路线和整次实测。
  * 所有反馈都留在本面板内，不触碰也不清除原路线。
  */
 export function WalkTrialPanel({ snapshot }: WalkTrialPanelProps) {
@@ -143,6 +145,30 @@ export function WalkTrialPanel({ snapshot }: WalkTrialPanelProps) {
         err instanceof ApiError
           ? err.fieldErrors
           : [{ field: "__network__", message: "推进检查点失败，请重试" }]
+      );
+    } finally {
+      requestInFlight.current = false;
+      setBusy(false);
+    }
+  }
+
+  async function handleUndo() {
+    if (requestInFlight.current || !progress) return;
+    requestInFlight.current = true;
+    setBusy(true);
+    setErrors([]);
+    try {
+      const next = await undoWalkTrial(progress.id);
+      // 撤回成功：进度回退到上一格，面板据响应重新展示下一坐标与秒数
+      // 输入框；已填写的秒数草稿保留，可直接修正后重新确认。
+      setProgress(next);
+    } catch (err) {
+      // 撤回被拒（尚无已确认分段 / 编号不存在）：字段级反馈留在面板内，
+      // 进度、原路线与当前输入都不变。
+      setErrors(
+        err instanceof ApiError
+          ? err.fieldErrors
+          : [{ field: "__network__", message: "撤回上一段失败，请重试" }]
       );
     } finally {
       requestInFlight.current = false;
@@ -319,9 +345,25 @@ export function WalkTrialPanel({ snapshot }: WalkTrialPanelProps) {
 
           {progress.completed && (
             <p className="result-note" data-testid="walk-done-note">
-              检查点已全部确认，不能继续推进；如需重测请编辑平面后重新核验、再发起新实测。
+              检查点已全部确认，总耗时已锁定；若末段秒数有误，可撤回上一段后重新确认，
+              或编辑平面重新核验、再发起新实测。
             </p>
           )}
+
+          <div className="walk-undo-row">
+            <button
+              type="button"
+              className="btn"
+              data-testid="walk-undo-button"
+              onClick={handleUndo}
+              disabled={busy}
+            >
+              {busy ? "处理中…" : "撤回上一段"}
+            </button>
+            <span className="result-note">
+              输错某段秒数时撤回最后一次推进，再按正确秒数重新确认；路线快照与实测编号不变。
+            </span>
+          </div>
 
           {progress.segments.length > 0 && (
             <details className="walk-segments">

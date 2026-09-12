@@ -10,8 +10,9 @@
   设定了目标的实测在读取进度时按“本段秒数 > 目标 → 超时，否则达标”
   逐段判定，判定结果与落库目标天然一致，无需额外落库。
 
-对外只暴露两个写操作（见 ``main`` 中的路由）：
-``create_trial`` 与 ``advance_trial``；不提供任何修改/删除接口。
+对外只暴露三个写操作（见 ``main`` 中的路由）：
+``create_trial``、``advance_trial`` 与 ``undo_trial``（撤回最后一次推进）；
+不提供任何其它修改/删除接口。
 
 错误统一抛 :class:`WalkError`，携带与既有接口相同的字段级错误
 结构 ``[{"field": ..., "message": ...}, ...]``，由主应用转成 422。
@@ -268,6 +269,22 @@ def parse_seconds(payload: Any) -> int:
     return value
 
 
+def validate_undo_payload(payload: Any) -> None:
+    """校验撤回请求体：撤回无需任何参数，只允许空对象。
+
+    多余字段一律以字段级错误拒绝（与既有写接口的严格风格一致）；
+    校验失败在写库之前抛出，数据不发生变化。
+    """
+
+    if not isinstance(payload, dict):
+        raise WalkError([_err("body", "请求体必须是 JSON 对象")])
+    extra = sorted(key for key in payload)
+    if extra:
+        raise WalkError(
+            [_err(extra[0], f"存在不允许的多余字段“{extra[0]}”")]
+        )
+
+
 def parse_target_seconds(payload: dict[str, Any]) -> int | None:
     """校验创建请求中可选的单段目标秒数。
 
@@ -389,7 +406,7 @@ def _load_progress(conn: sqlite3.Connection, trial_id: str) -> dict[str, Any] | 
 
 
 # --------------------------------------------------------------------------- #
-# 两个写操作
+# 三个写操作
 # --------------------------------------------------------------------------- #
 
 
@@ -477,6 +494,62 @@ def advance_trial(conn: sqlite3.Connection, trial_id: str, seconds: int) -> dict
             """,
             (next_index, new_elapsed, 1 if completed else 0, new_elapsed,
              1 if completed else 0, trial_id),
+        )
+
+    progress = _load_progress(conn, trial_id)
+    assert progress is not None
+    return progress
+
+
+def undo_trial(conn: sqlite3.Connection, trial_id: str) -> dict[str, Any]:
+    """撤回最后一次推进：删除最后一条逐段记录并回退检查点。
+
+    * 编号不存在 → 422（trialId 字段），不写任何数据；
+    * 尚无已确认分段（检查点仍在起点）→ 422（checkpoint 字段），不写任何数据；
+    * 成功 → 从剩余落库分段重新生成累计时间、完成状态与目标判定汇总，
+      返回与创建/推进相同的完整进度；撤回已完成实测的末段后，记录恢复
+      为进行中（completed=0、total_seconds=NULL），可继续按正确秒数推进。
+
+    与推进相同，整个“读当前检查点 → 删末段 → 回退”过程放在
+    ``BEGIN IMMEDIATE`` 写事务内，锁内读到的一定是已提交的最新状态：
+    并发的撤回/推进请求被串行化，不会出现丢失更新或 500。
+    """
+
+    with _immediate_txn(conn):
+        # 锁内重读：拿到的一定是此前已提交事务后的最新状态
+        trial = conn.execute(
+            "SELECT * FROM walk_trials WHERE id = ?", (trial_id,)
+        ).fetchone()
+        if trial is None:
+            raise WalkError([_err("trialId", f"实测编号不存在：{trial_id}")])
+        checkpoint = trial["checkpoint"]
+        if checkpoint <= 0:
+            raise WalkError(
+                [_err("checkpoint", "尚无已确认的分段，无法撤回；当前仍在起点")]
+            )
+
+        # 删除最后一条逐段记录（当前检查点对应的那一段）
+        conn.execute(
+            "DELETE FROM walk_segments WHERE trial_id = ? AND step_index = ?",
+            (trial_id, checkpoint),
+        )
+
+        # 累计时间从剩余落库分段重新求和（与逐段记录严格同源，而非简单减法）；
+        # 完成状态一并回退：撤回后必然未完成，锁定的总耗时解除。
+        new_elapsed = conn.execute(
+            "SELECT COALESCE(SUM(seconds), 0) FROM walk_segments WHERE trial_id = ?",
+            (trial_id,),
+        ).fetchone()[0]
+        conn.execute(
+            """
+            UPDATE walk_trials
+               SET checkpoint = ?,
+                   elapsed_seconds = ?,
+                   total_seconds = NULL,
+                   completed = 0
+             WHERE id = ?
+            """,
+            (checkpoint - 1, new_elapsed, trial_id),
         )
 
     progress = _load_progress(conn, trial_id)

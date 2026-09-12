@@ -1,8 +1,9 @@
 """FastAPI 入口：路线核验、通行实测与健康检查。
 
 * ``POST /api/shortest-path``：网格平面的唯一最短路线核验；
-* ``POST /api/walk-trials``、``POST /api/walk-trials/{id}/advance``：
-  通行实测的创建与检查点推进（SQLite 落库，见 ``walk.py``）；
+* ``POST /api/walk-trials``、``POST /api/walk-trials/{id}/advance``、
+  ``POST /api/walk-trials/{id}/undo``：
+  通行实测的创建、检查点推进与撤回最后一次推进（SQLite 落库，见 ``walk.py``）；
 * ``GET /api/health``：健康检查。
 
 错误响应统一为：
@@ -26,7 +27,9 @@ from .walk import (
     create_trial,
     get_connection,
     parse_seconds,
+    undo_trial,
     validate_create,
+    validate_undo_payload,
 )
 
 app = FastAPI(
@@ -96,15 +99,18 @@ async def walk_error_handler(_request: Request, exc: WalkError) -> JSONResponse:
     return JSONResponse(status_code=422, content={"detail": exc.errors})
 
 
-async def _read_json_object(request: Request) -> Any:
+async def _read_json_object(request: Request, *, allow_empty: bool = False) -> Any:
     """读取请求体 JSON；解析失败或不是对象时返回 422 字段级错误响应。
 
+    ``allow_empty=True`` 时把空请求体视为空对象（用于无参数的撤回接口）。
     返回 ``(payload, None)`` 表示成功；失败时返回 ``(None, JSONResponse)``。
     """
 
     try:
         payload = await request.json()
     except Exception:
+        if allow_empty and not (await request.body()).strip():
+            return {}, None
         return None, JSONResponse(
             status_code=422,
             content={
@@ -178,7 +184,7 @@ async def shortest_path(request: Request) -> Any:
 
 
 # --------------------------------------------------------------------------- #
-# 通行实测（只开放两个写接口：创建实测、推进检查点）
+# 通行实测（只开放三个写接口：创建实测、推进检查点、撤回最后一次推进）
 # --------------------------------------------------------------------------- #
 
 
@@ -221,3 +227,26 @@ async def advance_walk_trial(
     # 任一失败都在写库之前抛出，保证数据不变。
     seconds = parse_seconds(payload)
     return advance_trial(conn, trial_id, seconds)
+
+
+@app.post("/api/walk-trials/{trial_id}/undo")
+async def undo_walk_trial(
+    trial_id: str,
+    request: Request,
+    conn=Depends(get_connection),
+) -> Any:
+    """撤回最后一次推进：删除末段记录、回退检查点，返回完整进度。
+
+    撤回已完成实测的末段后，记录恢复为进行中（总耗时解锁），可按正确
+    秒数继续推进。尚无已确认分段（``checkpoint`` 字段）或编号不存在
+    （``trialId`` 字段）时返回 422 字段级错误，且数据不发生变化。
+    请求体可为空；多余字段一律拒绝。
+    """
+
+    payload, bad = await _read_json_object(request, allow_empty=True)
+    if bad is not None:
+        return bad
+    # 先校验请求体（无需查库即可拒绝），再校验编号与是否有可撤回分段；
+    # 任一失败都在写库之前抛出，保证数据不变。
+    validate_undo_payload(payload)
+    return undo_trial(conn, trial_id)

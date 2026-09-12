@@ -121,3 +121,15 @@ export async function advanceWalkTrial(
     seconds,
   })) as WalkTrialProgress;
 }
+
+/**
+ * 撤回某次实测的最后一次推进：删除末段记录并回退检查点。
+ * 返回与创建/推进相同的完整进度；撤回已完成实测的末段后恢复为进行中。
+ * 尚无已确认分段（checkpoint）或编号不存在（trialId）时抛出携带字段级
+ * 错误的 ApiError，且后端数据不发生变化。
+ */
+export async function undoWalkTrial(
+  trialId: string
+): Promise<WalkTrialProgress> {
+  return (await postJson(`/api/walk-trials/${trialId}/undo`, {})) as WalkTrialProgress;
+}

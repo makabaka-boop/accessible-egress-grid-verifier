@@ -723,6 +723,293 @@ def test_target_is_immutable_after_creation(client):
 
 
 # -------------------------------------------------------------------------- #
+# 撤回最后一次推进：中途撤回重录 / 完成后撤回再完成 / 空记录拒绝
+# -------------------------------------------------------------------------- #
+
+
+def undo(client, trial_id):
+    return client.post(f"/api/walk-trials/{trial_id}/undo", json={})
+
+
+def test_undo_mid_trial_then_rerecord(client):
+    """中途撤回：删除末段、回退检查点，可按正确秒数继续推进直至完成。"""
+    trial = create_trial(client, path2())
+    tid = trial["id"]
+    for s in (12, 8, 100):
+        advance(client, tid, s)
+
+    undone = undo(client, tid)
+    assert undone.status_code == 200, undone.text
+    data = undone.json()
+    # 返回与创建/推进相同的完整进度结构
+    assert set(data.keys()) == set(trial.keys())
+    assert data["checkpoint"] == 2
+    assert data["elapsedSeconds"] == 20  # 12 + 8，从剩余分段重新求和
+    assert data["completed"] is False
+    assert data["status"] == "in_progress"
+    assert data["totalSeconds"] is None
+    assert data["nextCoordinate"] == {"row": 1, "col": 2}
+    assert data["progressPercent"] == 50.0
+    assert data["remainingSteps"] == 2
+    assert [s["seconds"] for s in data["segments"]] == [12, 8]
+    assert data["path"] == path2()  # 快照不变
+
+    # 落库与响应一致：末段已删除、检查点回退
+    with open_db(client) as conn:
+        row = conn.execute("SELECT * FROM walk_trials WHERE id = ?", (tid,)).fetchone()
+        segs = conn.execute(
+            "SELECT step_index, seconds FROM walk_segments "
+            "WHERE trial_id = ? ORDER BY step_index",
+            (tid,),
+        ).fetchall()
+    assert row["checkpoint"] == 2
+    assert row["elapsed_seconds"] == 20
+    assert row["total_seconds"] is None
+    assert row["completed"] == 0
+    assert [(r["step_index"], r["seconds"]) for r in segs] == [(1, 12), (2, 8)]
+
+    # 按正确秒数重录该段，再继续走到出口
+    third = advance(client, tid, 40).json()
+    assert third["checkpoint"] == 3
+    assert third["elapsedSeconds"] == 60
+    assert [s["seconds"] for s in third["segments"]] == [12, 8, 40]
+    done = advance(client, tid, 5).json()
+    assert done["completed"] is True
+    assert done["totalSeconds"] == 65
+
+
+def test_undo_completed_trial_reopens_and_can_complete_again(client):
+    """完成后撤回末段：记录恢复进行中、总耗时解锁，可重新完成并锁定新值。"""
+    trial = create_trial(
+        client,
+        [{"row": 0, "col": 0}, {"row": 0, "col": 1}, {"row": 0, "col": 2}],
+    )
+    tid = trial["id"]
+    advance(client, tid, 10)
+    done = advance(client, tid, 20).json()
+    assert done["completed"] is True
+    assert done["totalSeconds"] == 30
+
+    reopened = undo(client, tid).json()
+    assert reopened["completed"] is False
+    assert reopened["status"] == "in_progress"
+    assert reopened["checkpoint"] == 1
+    assert reopened["elapsedSeconds"] == 10
+    assert reopened["totalSeconds"] is None  # 锁定解除
+    assert reopened["nextCoordinate"] == {"row": 0, "col": 2}
+    assert reopened["remainingSteps"] == 1
+    assert [s["seconds"] for s in reopened["segments"]] == [10]
+
+    with open_db(client) as conn:
+        row = conn.execute("SELECT * FROM walk_trials WHERE id = ?", (tid,)).fetchone()
+    assert row["completed"] == 0
+    assert row["total_seconds"] is None
+    assert row["checkpoint"] == 1
+
+    # 重新完成：新的末段秒数锁定为新的总耗时
+    redone = advance(client, tid, 25).json()
+    assert redone["completed"] is True
+    assert redone["totalSeconds"] == 35
+    assert [s["seconds"] for s in redone["segments"]] == [10, 25]
+    with open_db(client) as conn:
+        row = conn.execute("SELECT * FROM walk_trials WHERE id = ?", (tid,)).fetchone()
+    assert row["completed"] == 1
+    assert row["total_seconds"] == 35
+
+
+def test_undo_all_the_way_back_to_start(client):
+    """连续撤回至起点：检查点归零、累计清零，下一格回到路线第 1 格。"""
+    trial = create_trial(
+        client,
+        [{"row": 0, "col": 0}, {"row": 0, "col": 1}, {"row": 0, "col": 2}],
+    )
+    tid = trial["id"]
+    advance(client, tid, 10)
+    advance(client, tid, 20)
+
+    first = undo(client, tid).json()
+    assert first["checkpoint"] == 1
+    second = undo(client, tid).json()
+    assert second["checkpoint"] == 0
+    assert second["elapsedSeconds"] == 0
+    assert second["segments"] == []
+    assert second["nextCoordinate"] == {"row": 0, "col": 1}
+    assert second["progressPercent"] == 0
+    assert second["remainingSteps"] == 2
+
+    with open_db(client) as conn:
+        seg_count = conn.execute(
+            "SELECT COUNT(*) FROM walk_segments WHERE trial_id = ?", (tid,)
+        ).fetchone()[0]
+    assert seg_count == 0
+
+
+def test_undo_without_confirmed_segments_rejected_no_change(client):
+    """空记录（尚无已确认段）撤回：422 定位 checkpoint，数据不变。"""
+    trial = create_trial(client, path2())
+    tid = trial["id"]
+
+    res = undo(client, tid)
+    assert res.status_code == 422
+    detail = res.json()["detail"]
+    assert any(e["field"] == "checkpoint" for e in detail), detail
+
+    # 数据不变：检查点仍为 0、无分段、实测记录仍在
+    with open_db(client) as conn:
+        row = conn.execute("SELECT * FROM walk_trials WHERE id = ?", (tid,)).fetchone()
+        seg_count = conn.execute(
+            "SELECT COUNT(*) FROM walk_segments WHERE trial_id = ?", (tid,)
+        ).fetchone()[0]
+    assert row["checkpoint"] == 0
+    assert row["elapsed_seconds"] == 0
+    assert row["completed"] == 0
+    assert seg_count == 0
+
+    # 推进一段再撤回归零后，再次撤回仍被拒且不改库
+    advance(client, tid, 9)
+    assert undo(client, tid).status_code == 200
+    res = undo(client, tid)
+    assert res.status_code == 422
+    assert any(e["field"] == "checkpoint" for e in res.json()["detail"])
+    with open_db(client) as conn:
+        row = conn.execute("SELECT checkpoint FROM walk_trials WHERE id = ?", (tid,)).fetchone()
+        seg_count = conn.execute(
+            "SELECT COUNT(*) FROM walk_segments WHERE trial_id = ?", (tid,)
+        ).fetchone()[0]
+    assert row["checkpoint"] == 0
+    assert seg_count == 0
+
+
+def test_undo_unknown_trial_id(client):
+    res = undo(client, "deadbeefdeadbeefdeadbeefdeadbeef")
+    assert res.status_code == 422
+    detail = res.json()["detail"]
+    assert any(e["field"] == "trialId" and "不存在" in e["message"] for e in detail)
+    with open_db(client) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM walk_segments").fetchone()[0] == 0
+
+
+def test_undo_with_target_recomputes_verdict_summary(client):
+    """设有目标时撤回：分类汇总从剩余分段重新生成，坐标与计数准确。"""
+    trial = create_trial_with_target(client, path2(), 15)
+    tid = trial["id"]
+    # 10 达标、20 超时、30 超时、5 达标 → 完成后 达标2 / 超时2
+    for s in (10, 20, 30, 5):
+        last = advance(client, tid, s).json()
+    assert last["completed"] is True
+    assert last["verdictSummary"]["onTargetCount"] == 2
+    assert last["verdictSummary"]["overtimeCount"] == 2
+
+    # 撤回末段（5 秒达标段）：恢复进行中，汇总只剩 达标1 / 超时2
+    undone = undo(client, tid).json()
+    assert undone["completed"] is False
+    assert undone["targetSeconds"] == 15
+    assert [s["verdict"] for s in undone["segments"]] == [
+        "on_target", "overtime", "overtime",
+    ]
+    assert undone["verdictSummary"] == {
+        "onTargetCount": 1,
+        "overtimeCount": 2,
+        "onTargetCoordinates": [{"row": 0, "col": 1}],
+        "overtimeCoordinates": [{"row": 0, "col": 2}, {"row": 1, "col": 2}],
+    }
+    assert undone["nextCoordinate"] == {"row": 2, "col": 2}
+
+    # 再撤回一段（30 秒超时段）：汇总只剩 达标1 / 超时1
+    undone2 = undo(client, tid).json()
+    assert undone2["verdictSummary"] == {
+        "onTargetCount": 1,
+        "overtimeCount": 1,
+        "onTargetCoordinates": [{"row": 0, "col": 1}],
+        "overtimeCoordinates": [{"row": 0, "col": 2}],
+    }
+
+    # 重录末段为达标秒数并再次完成：汇总随之更新
+    advance(client, tid, 12)
+    redone = advance(client, tid, 40).json()
+    assert redone["completed"] is True
+    assert redone["verdictSummary"] == {
+        "onTargetCount": 2,
+        "overtimeCount": 2,
+        "onTargetCoordinates": [{"row": 0, "col": 1}, {"row": 1, "col": 2}],
+        "overtimeCoordinates": [{"row": 0, "col": 2}, {"row": 2, "col": 2}],
+    }
+    assert redone["totalSeconds"] == 10 + 20 + 12 + 40
+
+
+def test_undo_without_target_keeps_legacy_shape(client):
+    """未设目标的实测撤回后仍无判定与汇总（与旧契约一致）。"""
+    trial = create_trial(client, path2())
+    tid = trial["id"]
+    advance(client, tid, 10)
+    advance(client, tid, 20)
+    undone = undo(client, tid).json()
+    assert undone["targetSeconds"] is None
+    assert undone["verdictSummary"] is None
+    assert all(s["verdict"] is None for s in undone["segments"])
+
+
+def test_undo_rejects_extra_body_field(client):
+    trial = create_trial(client, path2())
+    advance(client, trial["id"], 10)
+    res = client.post(f"/api/walk-trials/{trial['id']}/undo", json={"seconds": 5})
+    assert res.status_code == 422
+    assert any(e["field"] == "seconds" for e in res.json()["detail"])
+    # 数据不变：分段仍在
+    with open_db(client) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM walk_segments WHERE trial_id = ?", (trial["id"],)
+        ).fetchone()[0] == 1
+
+
+def test_undo_accepts_empty_body(client):
+    """撤回接口允许完全不带请求体（空体视为空对象）。"""
+    trial = create_trial(client, path2())
+    advance(client, trial["id"], 10)
+    res = client.post(f"/api/walk-trials/{trial['id']}/undo")
+    assert res.status_code == 200
+    assert res.json()["checkpoint"] == 0
+
+
+def test_two_simultaneous_undos_both_succeed_no_500(client):
+    """两名核验员同时撤回：请求串行化，各撤一段，不 500、不丢更新。"""
+    trial = create_trial(
+        client,
+        [{"row": 0, "col": 0}, {"row": 0, "col": 1}, {"row": 0, "col": 2}],
+    )
+    tid = trial["id"]
+    advance(client, tid, 10)
+    advance(client, tid, 20)
+
+    results: list = [None, None]
+    barrier = threading.Barrier(2)
+
+    def worker(index: int) -> None:
+        barrier.wait()
+        res = undo(client, tid)
+        results[index] = (res.status_code, res.json())
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # 两次撤回都成功：各删一段，最终回到起点
+    assert [s for s, _ in results] == [200, 200], results
+    checkpoints = sorted(b["checkpoint"] for _, b in results)
+    assert checkpoints == [0, 1]
+    with open_db(client) as conn:
+        row = conn.execute("SELECT * FROM walk_trials WHERE id = ?", (tid,)).fetchone()
+        seg_count = conn.execute(
+            "SELECT COUNT(*) FROM walk_segments WHERE trial_id = ?", (tid,)
+        ).fetchone()[0]
+    assert row["checkpoint"] == 0
+    assert row["elapsed_seconds"] == 0
+    assert seg_count == 0
+
+
+# -------------------------------------------------------------------------- #
 # 迁移与表结构
 # -------------------------------------------------------------------------- #
 

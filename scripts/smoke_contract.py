@@ -350,6 +350,77 @@ check(
     and body.get("verdictSummary") is None,
 )
 
+print("== 通行实测：撤回最后一次推进（中途撤回重录 / 完成后撤回再完成 / 空记录拒绝） ==")
+status, body = request(f"{API}/api/walk-trials", {"path": walk_path})
+undo_id = body.get("id")
+# 空记录（尚无已确认段）撤回：拒绝且不改库
+status, body = request(f"{API}/api/walk-trials/{undo_id}/undo", {})
+check(
+    "尚无已确认段撤回返回 422 且定位 checkpoint",
+    status == 422 and any(e.get("field") == "checkpoint" for e in body.get("detail", [])),
+)
+status, body = request(f"{API}/api/walk-trials/{undo_id}/advance", {"seconds": 10})
+check(
+    "被拒撤回未改库：检查点从 0 正常推进到 1",
+    status == 200 and body.get("checkpoint") == 1 and body.get("elapsedSeconds") == 10,
+)
+# 中途撤回末段后重录
+status, body = request(f"{API}/api/walk-trials/{undo_id}/undo", {})
+check(
+    "中途撤回后回退到起点：checkpoint 0、累计 0、下一格 (0,1)",
+    status == 200
+    and body.get("checkpoint") == 0
+    and body.get("elapsedSeconds") == 0
+    and body.get("nextCoordinate") == {"row": 0, "col": 1}
+    and body.get("segments") == [],
+)
+request(f"{API}/api/walk-trials/{undo_id}/advance", {"seconds": 12})
+status, body = request(f"{API}/api/walk-trials/{undo_id}/advance", {"seconds": 20})
+check(
+    "重录后完成并锁定 32",
+    status == 200 and body.get("completed") is True and body.get("totalSeconds") == 32,
+)
+# 完成后撤回末段：恢复进行中，再重新完成
+status, body = request(f"{API}/api/walk-trials/{undo_id}/undo", {})
+check(
+    "完成后撤回末段：恢复进行中、总耗时解锁、下一格 (0,2)",
+    status == 200
+    and body.get("completed") is False
+    and body.get("status") == "in_progress"
+    and body.get("checkpoint") == 1
+    and body.get("elapsedSeconds") == 12
+    and body.get("totalSeconds") is None
+    and body.get("nextCoordinate") == {"row": 0, "col": 2},
+)
+status, body = request(f"{API}/api/walk-trials/{undo_id}/advance", {"seconds": 25})
+check(
+    "重新完成后锁定新总耗时 37，逐段为 12 + 25",
+    status == 200
+    and body.get("completed") is True
+    and body.get("totalSeconds") == 37
+    and [s.get("seconds") for s in body.get("segments", [])] == [12, 25],
+)
+# 编号不存在
+status, body = request(f"{API}/api/walk-trials/nonexistentid/undo", {})
+check(
+    "不存在编号撤回返回 422 且定位 trialId",
+    status == 422 and any(e.get("field") == "trialId" for e in body.get("detail", [])),
+)
+# 设有目标时撤回后分类汇总准确
+status, body = request(f"{API}/api/walk-trials", {"path": walk_path, "targetSeconds": 15})
+undo_target_id = body.get("id")
+request(f"{API}/api/walk-trials/{undo_target_id}/advance", {"seconds": 10})
+request(f"{API}/api/walk-trials/{undo_target_id}/advance", {"seconds": 20})
+status, body = request(f"{API}/api/walk-trials/{undo_target_id}/undo", {})
+check(
+    "设目标的实测撤回超时段后：汇总仅剩达标段，坐标准确",
+    status == 200
+    and body.get("verdictSummary", {}).get("onTargetCount") == 1
+    and body.get("verdictSummary", {}).get("overtimeCount") == 0
+    and body.get("verdictSummary", {}).get("onTargetCoordinates") == [{"row": 0, "col": 1}]
+    and body.get("verdictSummary", {}).get("overtimeCoordinates") == [],
+)
+
 print("== 通行实测经 web /api 代理同样可用 ==")
 status, body = request(f"{WEB}/api/walk-trials", {"path": walk_path})
 check("经 web 代理创建实测成功", status == 200 and body.get("nextCoordinate") is not None)

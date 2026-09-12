@@ -314,6 +314,67 @@ test("场景⑦：设定单段目标——非法目标保留可修正，超时�
   await expect(page.locator('[data-testid="cell-0-1"].cell-path')).toHaveCount(1);
 });
 
+test("场景⑧：撤回最后一次推进——中途撤回重录、完成后撤回再完成，原路线保留", async ({
+  page,
+}) => {
+  // 1 行向 3 格：起点 (0,0)、出口 (0,2)，路线 (0,0)→(0,1)→(0,2)，共 2 段
+  await page.getByLabel("行数").fill("2");
+  await page.getByLabel("列数").fill("3");
+  await page.getByRole("button", { name: "应用尺寸" }).click();
+  await page.getByRole("button", { name: /① 起点/ }).click();
+  await page.getByTestId("cell-0-0").click();
+  await page.getByRole("button", { name: /② 出口/ }).click();
+  await page.getByTestId("cell-0-2").click();
+  await page.getByTestId("verify-button").click();
+  await expect(page.getByTestId("result-ok")).toBeVisible();
+
+  await page.getByTestId("walk-start-button").click();
+  await expect(page.getByTestId("walk-running")).toBeVisible();
+  // 进行中面板即显示撤回入口；尚无已确认段时撤回被拒、反馈留在面板内
+  await page.getByTestId("walk-undo-button").click();
+  await expect(page.getByTestId("walk-errors")).toContainText("[checkpoint]");
+  await expect(page.getByTestId("walk-elapsed")).toHaveText("0");
+
+  // 第 1 段误输 100 秒 → 撤回 → 按正确秒数 12 重录
+  await page.getByTestId("walk-seconds-input").fill("100");
+  await page.getByTestId("walk-advance-button").click();
+  await expect(page.getByTestId("walk-elapsed")).toHaveText("100");
+  await page.getByTestId("walk-undo-button").click();
+  await expect(page.getByTestId("walk-next")).toHaveText("(0, 1)");
+  await expect(page.getByTestId("walk-elapsed")).toHaveText("0");
+  await expect(page.getByTestId("walk-percent")).toContainText("0/2");
+  await page.getByTestId("walk-seconds-input").fill("12");
+  await page.getByTestId("walk-advance-button").click();
+  await expect(page.getByTestId("walk-next")).toHaveText("(0, 2)");
+  await expect(page.getByTestId("walk-elapsed")).toHaveText("12");
+
+  // 第 2 段 20 秒 → 完成锁定 32；完成态仍显示撤回入口
+  await page.getByTestId("walk-seconds-input").fill("20");
+  await page.getByTestId("walk-advance-button").click();
+  await expect(page.getByTestId("walk-locked")).toBeVisible();
+  await expect(page.getByTestId("walk-total")).toHaveText("32");
+  await expect(page.getByTestId("walk-undo-button")).toBeVisible();
+
+  // 完成后撤回末段：恢复进行中，重新展示下一坐标与秒数输入框
+  await page.getByTestId("walk-undo-button").click();
+  await expect(page.getByTestId("walk-locked")).toHaveCount(0);
+  await expect(page.getByTestId("walk-next")).toHaveText("(0, 2)");
+  await expect(page.getByTestId("walk-elapsed")).toHaveText("12");
+  await expect(page.getByTestId("walk-seconds-input")).toBeVisible();
+
+  // 按正确秒数重新完成：锁定新总耗时 37
+  await page.getByTestId("walk-seconds-input").fill("25");
+  await page.getByTestId("walk-advance-button").click();
+  await expect(page.getByTestId("walk-locked")).toBeVisible();
+  await expect(page.getByTestId("walk-total")).toHaveText("37");
+  await page.getByText("逐段秒数").click();
+  await expect(page.getByTestId("walk-sum")).toContainText("12 + 25 = 37");
+
+  // 整个撤回/重录过程中画布上的原路线始终保留、实测编号不变
+  await expect(page.locator('[data-testid="cell-0-1"].cell-path')).toHaveCount(1);
+  await expect(page.getByTestId("result-ok")).toBeVisible();
+});
+
 test("场景④：非法重叠返回字段错误时清空旧轨迹并高亮对应费力格", async ({ page }) => {
   await page.getByLabel("行数").fill("3");
   await page.getByLabel("列数").fill("3");

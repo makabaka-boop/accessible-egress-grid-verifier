@@ -4,6 +4,7 @@ import {
   advanceWalkTrial,
   createWalkTrial,
   findShortestPath,
+  undoWalkTrial,
 } from "./api";
 import type { GridPlanRequest } from "../types";
 
@@ -290,5 +291,51 @@ describe("通行实测 API", () => {
     const err = await advanceWalkTrial("nope", 10).catch((e) => e);
     expect(err).toBeInstanceOf(ApiError);
     expect((err as ApiError).fieldErrors[0].field).toBe("trialId");
+  });
+
+  it("undoWalkTrial 提交空对象并返回回退后的完整进度", async () => {
+    const after = {
+      ...trialProgress,
+      checkpoint: 0,
+      nextCoordinate: { row: 0, col: 1 },
+      elapsedSeconds: 0,
+      segments: [],
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify(after), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await undoWalkTrial("t1");
+    expect(result.checkpoint).toBe(0);
+    expect(result.nextCoordinate).toEqual({ row: 0, col: 1 });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/walk-trials/t1/undo");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({});
+  });
+
+  it("undoWalkTrial 尚无已确认段返回 422 时定位到 checkpoint", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              detail: [{ field: "checkpoint", message: "尚无已确认的分段，无法撤回" }],
+            }),
+            { status: 422, headers: { "Content-Type": "application/json" } }
+          )
+        )
+      )
+    );
+    const err = await undoWalkTrial("t1").catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).fieldErrors[0].field).toBe("checkpoint");
   });
 });

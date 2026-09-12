@@ -452,4 +452,199 @@ describe("WalkTrialPanel", () => {
     await waitFor(() => expect(screen.getByTestId("walk-elapsed").textContent).toBe("10"));
     expect(screen.queryByTestId("walk-verdict-summary")).toBeNull();
   });
+
+  it("进行中面板显示撤回入口：撤回后重新展示下一坐标与秒数输入", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(progress()))
+      // 推进一段
+      .mockResolvedValueOnce(
+        jsonResponse(
+          progress({
+            checkpoint: 1,
+            nextCoordinate: { row: 0, col: 2 },
+            elapsedSeconds: 10,
+            progressPercent: 50,
+            remainingSteps: 1,
+            segments: [{ step: 1, row: 0, col: 1, seconds: 10, verdict: null }],
+          })
+        )
+      )
+      // 撤回该段：回到起点
+      .mockResolvedValueOnce(jsonResponse(progress()));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<WalkTrialPanel snapshot={PATH_3} />);
+
+    fireEvent.click(screen.getByTestId("walk-start-button"));
+    await waitFor(() => expect(screen.getByTestId("walk-running")).toBeTruthy());
+    // 进行中面板即显示撤回入口
+    expect(screen.getByTestId("walk-undo-button")).toBeTruthy();
+
+    fireEvent.change(screen.getByTestId("walk-seconds-input"), { target: { value: "10" } });
+    fireEvent.click(screen.getByTestId("walk-advance-button"));
+    await waitFor(() => expect(screen.getByTestId("walk-elapsed").textContent).toBe("10"));
+    expect(screen.getByTestId("walk-next").textContent).toBe("(0, 2)");
+
+    fireEvent.click(screen.getByTestId("walk-undo-button"));
+    await waitFor(() => expect(screen.getByTestId("walk-elapsed").textContent).toBe("0"));
+    const [undoUrl, undoInit] = fetchMock.mock.calls[2];
+    expect(undoUrl).toBe("/api/walk-trials/abc123/undo");
+    expect(undoInit.method).toBe("POST");
+    // 撤回后重新展示下一坐标与秒数输入框，可继续按正确秒数推进
+    expect(screen.getByTestId("walk-next").textContent).toBe("(0, 1)");
+    expect(screen.getByTestId("walk-percent").textContent).toContain("0/2");
+    expect(screen.getByTestId("walk-seconds-input")).toBeTruthy();
+    expect(screen.getByTestId("walk-advance-button")).toBeTruthy();
+  });
+
+  it("已完成面板也显示撤回入口：撤回末段后恢复进行中并可重新完成", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(progress()))
+      .mockResolvedValueOnce(
+        jsonResponse(
+          progress({
+            checkpoint: 1,
+            nextCoordinate: { row: 0, col: 2 },
+            elapsedSeconds: 10,
+            progressPercent: 50,
+            remainingSteps: 1,
+            segments: [{ step: 1, row: 0, col: 1, seconds: 10, verdict: null }],
+          })
+        )
+      )
+      // 完成：锁定 35
+      .mockResolvedValueOnce(
+        jsonResponse(
+          progress({
+            status: "completed",
+            checkpoint: 2,
+            nextCoordinate: null,
+            elapsedSeconds: 35,
+            totalSeconds: 35,
+            progressPercent: 100,
+            remainingSteps: 0,
+            completed: true,
+            segments: [
+              { step: 1, row: 0, col: 1, seconds: 10, verdict: null },
+              { step: 2, row: 0, col: 2, seconds: 25, verdict: null },
+            ],
+          })
+        )
+      )
+      // 撤回末段：恢复进行中
+      .mockResolvedValueOnce(
+        jsonResponse(
+          progress({
+            checkpoint: 1,
+            nextCoordinate: { row: 0, col: 2 },
+            elapsedSeconds: 10,
+            progressPercent: 50,
+            remainingSteps: 1,
+            segments: [{ step: 1, row: 0, col: 1, seconds: 10, verdict: null }],
+          })
+        )
+      )
+      // 重新完成：锁定 40
+      .mockResolvedValueOnce(
+        jsonResponse(
+          progress({
+            status: "completed",
+            checkpoint: 2,
+            nextCoordinate: null,
+            elapsedSeconds: 40,
+            totalSeconds: 40,
+            progressPercent: 100,
+            remainingSteps: 0,
+            completed: true,
+            segments: [
+              { step: 1, row: 0, col: 1, seconds: 10, verdict: null },
+              { step: 2, row: 0, col: 2, seconds: 30, verdict: null },
+            ],
+          })
+        )
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    render(<WalkTrialPanel snapshot={PATH_3} />);
+
+    fireEvent.click(screen.getByTestId("walk-start-button"));
+    await waitFor(() => expect(screen.getByTestId("walk-running")).toBeTruthy());
+    fireEvent.change(screen.getByTestId("walk-seconds-input"), { target: { value: "10" } });
+    fireEvent.click(screen.getByTestId("walk-advance-button"));
+    await waitFor(() => expect(screen.getByTestId("walk-elapsed").textContent).toBe("10"));
+    fireEvent.change(screen.getByTestId("walk-seconds-input"), { target: { value: "25" } });
+    fireEvent.click(screen.getByTestId("walk-advance-button"));
+    await waitFor(() => expect(screen.getByTestId("walk-locked")).toBeTruthy());
+    expect(screen.getByTestId("walk-total").textContent).toBe("35");
+    // 完成态不显示推进控件，但显示撤回入口
+    expect(screen.queryByTestId("walk-advance-button")).toBeNull();
+    expect(screen.getByTestId("walk-undo-button")).toBeTruthy();
+
+    // 撤回末段：恢复进行中，重新展示下一坐标与秒数输入框
+    fireEvent.click(screen.getByTestId("walk-undo-button"));
+    await waitFor(() => expect(screen.getByTestId("walk-next").textContent).toBe("(0, 2)"));
+    expect(screen.queryByTestId("walk-locked")).toBeNull();
+    expect(screen.getByTestId("walk-elapsed").textContent).toBe("10");
+    expect(screen.getByTestId("walk-seconds-input")).toBeTruthy();
+
+    // 按正确秒数重新完成
+    fireEvent.change(screen.getByTestId("walk-seconds-input"), { target: { value: "30" } });
+    fireEvent.click(screen.getByTestId("walk-advance-button"));
+    await waitFor(() => expect(screen.getByTestId("walk-locked")).toBeTruthy());
+    expect(screen.getByTestId("walk-total").textContent).toBe("40");
+  });
+
+  it("撤回被 422 拒绝（尚无已确认段）：错误定位 checkpoint，进度与当前输入保留", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(progress()))
+      .mockResolvedValueOnce(
+        jsonResponse(
+          { detail: [{ field: "checkpoint", message: "尚无已确认的分段，无法撤回；当前仍在起点" }] },
+          422
+        )
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    render(<WalkTrialPanel snapshot={PATH_3} />);
+
+    fireEvent.click(screen.getByTestId("walk-start-button"));
+    await waitFor(() => expect(screen.getByTestId("walk-running")).toBeTruthy());
+
+    // 先在输入框填入尚未提交的秒数，再点撤回
+    const input = screen.getByTestId("walk-seconds-input") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "10" } });
+    fireEvent.click(screen.getByTestId("walk-undo-button"));
+    await waitFor(() => expect(screen.getByTestId("walk-errors")).toBeTruthy());
+    expect(screen.getByTestId("walk-errors").textContent).toContain("[checkpoint]");
+    expect(screen.getByTestId("walk-errors").textContent).toContain("无法撤回");
+    // 进度与当前输入都保留
+    expect(screen.getByTestId("walk-elapsed").textContent).toBe("0");
+    expect(screen.getByTestId("walk-next").textContent).toBe("(0, 1)");
+    expect(input.value).toBe("10");
+  });
+
+  it("撤回请求未返回时禁止重复操作：只发出一次撤回请求", async () => {
+    const pending = deferredResponse(progress());
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(progress()))
+      .mockImplementationOnce(() => pending.promise);
+    vi.stubGlobal("fetch", fetchMock);
+    render(<WalkTrialPanel snapshot={PATH_3} />);
+
+    fireEvent.click(screen.getByTestId("walk-start-button"));
+    await waitFor(() => expect(screen.getByTestId("walk-running")).toBeTruthy());
+
+    const undoButton = screen.getByTestId("walk-undo-button") as HTMLButtonElement;
+    fireEvent.click(undoButton);
+    fireEvent.click(undoButton);
+    expect(fetchMock.mock.calls.length).toBe(2);
+    expect(undoButton.disabled).toBe(true);
+
+    await act(async () => pending.resolve());
+    await waitFor(() =>
+      expect((screen.getByTestId("walk-undo-button") as HTMLButtonElement).disabled).toBe(false)
+    );
+    expect(fetchMock.mock.calls.length).toBe(2);
+  });
 });
