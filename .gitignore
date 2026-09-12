@@ -14,6 +14,15 @@ __pycache__/
 .venv/
 venv/
 
+# 通行实测落库的 SQLite 文件（API 进程内默认保存到 api/var/）
+*.db
+*.sqlite
+*.sqlite3
+api/var/
+
+# 本地无 pip 时安装到仓库内的依赖目录
+.pylibs/
+
 # 环境与系统文件
 .env
 *.log

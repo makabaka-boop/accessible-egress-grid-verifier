@@ -195,6 +195,80 @@ check("web 根路径返回 HTML", status == 200 and "<div id=\"root\"" in html)
 status, body = request(f"{WEB}/api/shortest-path", reachable_plan)
 check("web 的 /api 反向代理到后端并返回路线", status == 200 and body.get("reachable") is True)
 
+print("== 通行实测：创建 → 逐格推进 → 出口锁定（跨请求累积） ==")
+walk_path = [
+    {"row": 0, "col": 0},
+    {"row": 0, "col": 1},
+    {"row": 0, "col": 2},
+]
+status, body = request(f"{API}/api/walk-trials", {"path": walk_path})
+check("创建实测 status=200", status == 200)
+check(
+    "创建后检查点在起点、累计 0、下一格 (0,1)、快照不可变",
+    body.get("checkpoint") == 0
+    and body.get("elapsedSeconds") == 0
+    and body.get("totalSeconds") is None
+    and body.get("nextCoordinate") == {"row": 0, "col": 1}
+    and body.get("path") == walk_path
+    and body.get("totalSteps") == 2,
+)
+trial_id = body.get("id")
+
+status, body = request(f"{API}/api/walk-trials/{trial_id}/advance", {"seconds": 10})
+check("第 1 段推进 status=200 且累计 10", status == 200 and body.get("elapsedSeconds") == 10)
+check("第 1 段后下一格 (0,2)、进度 1/2", body.get("checkpoint") == 1
+      and body.get("nextCoordinate") == {"row": 0, "col": 2}
+      and body.get("progressPercent") == 50.0)
+
+status, body = request(f"{API}/api/walk-trials/{trial_id}/advance", {"seconds": 25})
+check("第 2 段到达出口、锁定总耗时 35", status == 200
+      and body.get("completed") is True
+      and body.get("totalSeconds") == 35
+      and body.get("elapsedSeconds") == 35
+      and body.get("nextCoordinate") is None
+      and body.get("progressPercent") == 100.0)
+check("逐段秒数回显并求和一致",
+      [s.get("seconds") for s in body.get("segments", [])] == [10, 25])
+
+print("== 通行实测：错误返回字段级结构且数据不变 ==")
+# 完成后继续推进
+status, after_lock = request(f"{API}/api/walk-trials/{trial_id}/advance", {"seconds": 7})
+check("完成后推进返回 422 且定位 completed", status == 422
+      and any(e.get("field") == "completed" for e in after_lock.get("detail", [])))
+# 非法秒数（0 / 整值小数 / 越界）
+for bad_seconds in (0, 3.0, 3601, "60"):
+    code, bad_body = request(
+        f"{API}/api/walk-trials/{trial_id}/advance", {"seconds": bad_seconds}
+    )
+    check(f"秒数 {bad_seconds!r} 返回 422 且定位 seconds",
+          code == 422 and any(e.get("field") == "seconds" for e in bad_body.get("detail", [])))
+# 编号不存在
+status, bad_body = request(f"{API}/api/walk-trials/nonexistentid/advance", {"seconds": 10})
+check("不存在编号返回 422 且定位 trialId", status == 422
+      and any(e.get("field") == "trialId" for e in bad_body.get("detail", [])))
+# 创建校验：路线至少两格、仅四方向
+status, bad_body = request(f"{API}/api/walk-trials", {"path": [{"row": 0, "col": 0}]})
+check("单格路线创建被拒（path）", status == 422
+      and any(e.get("field") == "path" for e in bad_body.get("detail", [])))
+status, bad_body = request(
+    f"{API}/api/walk-trials",
+    {"path": [{"row": 0, "col": 0}, {"row": 1, "col": 1}]},  # 斜向
+)
+check("斜向相邻路线创建被拒（path.1）", status == 422
+      and any(e.get("field") == "path.1" for e in bad_body.get("detail", [])))
+
+# 新建一次实测并走完，复查其锁定值，确认前面的非法推进未串改任何数据
+status, body = request(f"{API}/api/walk-trials", {"path": walk_path})
+other_id = body.get("id")
+request(f"{API}/api/walk-trials/{other_id}/advance", {"seconds": 5})
+status, body = request(f"{API}/api/walk-trials/{other_id}/advance", {"seconds": 7})
+check("另一条实测独立锁定为 12，不与前一条 35 串数据",
+      status == 200 and body.get("completed") is True and body.get("totalSeconds") == 12)
+
+print("== 通行实测经 web /api 代理同样可用 ==")
+status, body = request(f"{WEB}/api/walk-trials", {"path": walk_path})
+check("经 web 代理创建实测成功", status == 200 and body.get("nextCoordinate") is not None)
+
 if failures:
     print(f"\n❌ 冒烟失败 {len(failures)} 项：{failures}")
     sys.exit(1)

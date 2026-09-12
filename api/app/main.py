@@ -1,4 +1,9 @@
-"""FastAPI 入口：/api/shortest-path 与健康检查。
+"""FastAPI 入口：路线核验、通行实测与健康检查。
+
+* ``POST /api/shortest-path``：网格平面的唯一最短路线核验；
+* ``POST /api/walk-trials``、``POST /api/walk-trials/{id}/advance``：
+  通行实测的创建与检查点推进（SQLite 落库，见 ``walk.py``）；
+* ``GET /api/health``：健康检查。
 
 错误响应统一为：
     {"detail": [{"field": "<字段路径>", "message": "<可操作的中文说明>"}]}
@@ -8,17 +13,25 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from .models import GridPlan
 from .pathfinding import CELL_SIZE_METERS, find_shortest_path, path_travel_cost
 from .validation import SemanticError, validate_semantics
+from .walk import (
+    WalkError,
+    advance_trial,
+    create_trial,
+    get_connection,
+    parse_seconds,
+    validate_create,
+)
 
 app = FastAPI(
     title="社区礼堂轮椅疏散路线核验 API",
-    version="1.1.0",
+    version="1.2.0",
 )
 
 _FIELD_LABELS = {
@@ -78,35 +91,52 @@ async def semantic_error_handler(_request: Request, exc: SemanticError) -> JSONR
     return JSONResponse(status_code=422, content={"detail": exc.errors})
 
 
-@app.get("/api/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+@app.exception_handler(WalkError)
+async def walk_error_handler(_request: Request, exc: WalkError) -> JSONResponse:
+    return JSONResponse(status_code=422, content={"detail": exc.errors})
 
 
-@app.post("/api/shortest-path")
-async def shortest_path(request: Request) -> dict[str, Any]:
-    """接受网格平面，返回唯一最短路线或不可达结论。
+async def _read_json_object(request: Request) -> Any:
+    """读取请求体 JSON；解析失败或不是对象时返回 422 字段级错误响应。
 
-    请求体见 ``GridPlan``；校验失败返回 422 与字段级错误列表，
-    不返回任何路线。
+    返回 ``(payload, None)`` 表示成功；失败时返回 ``(None, JSONResponse)``。
     """
 
     try:
         payload = await request.json()
     except Exception:
-        return JSONResponse(
+        return None, JSONResponse(
             status_code=422,
             content={
                 "detail": [{"field": "body", "message": "请求体必须是合法的 JSON 对象"}]
             },
         )
     if not isinstance(payload, dict):
-        return JSONResponse(
+        return None, JSONResponse(
             status_code=422,
             content={
                 "detail": [{"field": "body", "message": "请求体必须是 JSON 对象"}]
             },
         )
+    return payload, None
+
+
+@app.get("/api/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.post("/api/shortest-path")
+async def shortest_path(request: Request) -> Any:
+    """接受网格平面，返回唯一最短路线或不可达结论。
+
+    请求体见 ``GridPlan``；校验失败返回 422 与字段级错误列表，
+    不返回任何路线。
+    """
+
+    payload, bad = await _read_json_object(request)
+    if bad is not None:
+        return bad
 
     try:
         plan = GridPlan(**payload)
@@ -145,3 +175,47 @@ async def shortest_path(request: Request) -> dict[str, Any]:
         "exploredCount": explored_count,
         "explored": [serialize(c) for c in explored_order],
     }
+
+
+# --------------------------------------------------------------------------- #
+# 通行实测（只开放两个写接口：创建实测、推进检查点）
+# --------------------------------------------------------------------------- #
+
+
+@app.post("/api/walk-trials")
+async def create_walk_trial(
+    request: Request,
+    conn=Depends(get_connection),
+) -> Any:
+    """以成功核验返回的不可变路线快照创建一次通行实测。
+
+    校验：路线至少两格，且相邻坐标仅四方向移动。失败返回 422 字段级错误，
+    不落库。创建成功后检查点停在起点（第 0 格），累计时间为 0。
+    """
+
+    payload, bad = await _read_json_object(request)
+    if bad is not None:
+        return bad
+    model = validate_create(payload)
+    return create_trial(conn, model)
+
+
+@app.post("/api/walk-trials/{trial_id}/advance")
+async def advance_walk_trial(
+    trial_id: str,
+    request: Request,
+    conn=Depends(get_connection),
+) -> Any:
+    """确认轮椅到达下一格并记录该段秒数，返回推进后的完整进度。
+
+    秒数不是 1 至 3600 的整数、编号不存在、或实测完成后继续推进，
+    均返回 422 字段级错误且数据不发生变化。
+    """
+
+    payload, bad = await _read_json_object(request)
+    if bad is not None:
+        return bad
+    # 先校验秒数（无需查库即可拒绝），再校验编号与完成状态；
+    # 任一失败都在写库之前抛出，保证数据不变。
+    seconds = parse_seconds(payload)
+    return advance_trial(conn, trial_id, seconds)

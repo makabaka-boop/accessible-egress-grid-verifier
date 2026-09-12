@@ -15,6 +15,24 @@
 - 出口不可达时明确返回“不可达”，给出真实的已探索格数（≥1），
   且前端画布不绘制任何路线。
 
+### 通行实测（核验通过后的独立模块）
+
+核验通过后，核验员可基于**不可变路线快照**发起一次“通行实测”：
+轮椅按路线逐格试走，每确认到达下一格就输入该段秒数（**1–3600 的整数**），
+面板持续显示**下一坐标、累计时间与完成进度**；到达出口后**锁定总耗时**。
+
+- 后端在 **API 进程内用 SQLite**（`api/var/walk_trials.db`，可用环境变量
+  `WALK_DB_PATH` 覆盖）保存实测记录，启动时按 `PRAGMA user_version`
+  **建表迁移**（`walk_trials` 快照/检查点表 + `walk_segments` 逐段表）。
+- 只开放两个写接口：`POST /api/walk-trials`（创建）与
+  `POST /api/walk-trials/{id}/advance`（推进检查点），无任何修改/删除接口。
+- 创建时校验**路线至少两格且相邻坐标仅四方向移动**；推进返回**完整进度**，
+  跨请求的累计时间来自落库的逐段秒数。
+- 秒数非法、实测编号不存在、完成后继续推进，统一返回既有字段级错误结构
+  （422 `detail`），且**数据不发生变化**。
+- 实测反馈只留在“通行实测”面板内，**不清除也不修改原核验路线**；
+  未发起实测的路线核验、费力格选路与旧响应行为完全兼容。
+
 ## 目录结构
 
 ```
@@ -23,12 +41,15 @@ api/                 FastAPI + Pydantic + 自研搜索
   app/models.py         请求模型（结构校验，difficultCells 为可选别名）
   app/validation.py     语义校验（越界/重合/阻挡/费力格）
   app/pathfinding.py    BFS（可达性/无费力格）+ 确定性加权搜索（费力格）
-  tests/test_api.py     pytest（34 个用例）
+  app/walk_models.py    通行实测创建模型（路线快照）
+  app/walk.py           SQLite 建表迁移 + 实测创建/推进两个写操作
+  tests/test_api.py     pytest（核验接口）
+  tests/test_walk.py    pytest（通行实测：跨请求累积、最终落库、422 不变数据）
 web/                 React + TypeScript + Vite
   src/lib/grid.ts       纯函数：网格编辑、提交前校验（vitest 覆盖）
-  src/lib/api.ts        API 客户端：422 转字段级错误
-  src/components/       网格编辑器、错误面板、结果面板
-  e2e/app.e2e.ts        Playwright 端到端（可达 / 不可达 / 422）
+  src/lib/api.ts        API 客户端：核验 + 实测创建/推进，422 转字段级错误
+  src/components/       网格编辑器、错误面板、结果面板、通行实测面板
+  e2e/app.e2e.ts        Playwright 端到端（可达 / 不可达 / 422 / 核验贯通实测）
 verify/              一次性验收服务（Dockerfile）
 scripts/             verify-local.sh 与 HTTP 契约冒烟脚本
 docker-compose.yml   web、api 与 verify 三个服务
@@ -184,6 +205,53 @@ WEB_PORT=8080 API_PORT=8000 bash scripts/verify-local.sh
 
 健康检查：`GET /api/health` → `{"status":"ok"}`。
 
+### `POST /api/walk-trials`（创建通行实测）
+
+以一次成功核验返回的有序路线作为**不可变快照**创建实测：
+
+```json
+{ "path": [{"row": 0, "col": 0}, {"row": 0, "col": 1}, {"row": 0, "col": 2}] }
+```
+
+- `path` 至少 2 格；相邻坐标必须**仅四方向移动**（曼哈顿距离 1），
+  斜向、跳格、原地都按 `path.<索引>` 字段错误拒绝；坐标仍须为严格整数。
+- 成功 `200` 返回完整进度（见下），创建时 `checkpoint=0`、
+  `elapsedSeconds=0`、`totalSeconds=null`、`nextCoordinate=path[1]`。
+
+### `POST /api/walk-trials/{id}/advance`（推进检查点）
+
+```json
+{ "seconds": 12 }
+```
+
+确认轮椅从上一格进入下一格用了 `seconds` 秒（**1–3600 的整数**），
+服务端只做一次 INSERT 并推进检查点，返回推进后的**完整进度**。
+走完最后一段时 `completed=true`、`totalSeconds` 锁定为各段之和。
+
+进度响应（创建/推进共用）：
+
+```json
+{
+  "id": "…", "status": "in_progress",
+  "path": [{"row": 0, "col": 0}, {"row": 0, "col": 1}, {"row": 0, "col": 2}],
+  "totalSteps": 2, "checkpoint": 1,
+  "nextCoordinate": {"row": 0, "col": 2},
+  "elapsedSeconds": 12, "totalSeconds": null,
+  "progressPercent": 50.0, "remainingSteps": 1, "completed": false,
+  "segments": [{"step": 1, "row": 0, "col": 1, "seconds": 12}],
+  "createdAt": "…"
+}
+```
+
+以下情况返回与核验接口一致的 422 `detail` 字段级错误，且**数据不发生变化**：
+
+| 情况 | 错误 `field` |
+| ---- | ------------ |
+| `seconds` 不是 1–3600 的整数（含 `3.0`、布尔、字符串、越界、缺失、多余字段） | `seconds` / 多余字段名 |
+| 实测编号不存在 | `trialId` |
+| 已完成（到达出口）后继续推进 | `completed` |
+| 创建路线不足两格 / 非四方向相邻 | `path` / `path.<索引>` |
+
 ## 四、前端行为约定（核验员视角）
 
 1. 选择工具（① 起点 / ② 出口 / ③ 阻挡 / ④ 费力 / 橡皮）后点击格放置；
@@ -199,3 +267,11 @@ WEB_PORT=8080 API_PORT=8000 bash scripts/verify-local.sh
    - **网络失败**：保持原有“无法连接核验服务”的提示行为。
 3. 任何一次对平面的编辑（含改尺寸、放格、擦除）都会立即作废上一次结果，
    画布不残留旧轨迹。
+4. 核验**通过**后，结果面板内出现独立的“通行实测”模块：
+   - 点「发起通行实测」即把当前路线作为不可变快照提交；之后逐格输入
+     到达下一格的秒数（1–3600 的整数）并确认；
+   - 面板持续显示**下一坐标、累计时间、逐段明细与完成进度条**，
+     到达出口后显示并锁定**总耗时**，不再展示推进控件；
+   - 秒数非法、编号不存在、完成后推进等反馈都以字段级错误形式
+     **留在实测面板内**，不会清除或改动上方已核验通过的原路线；
+   - 未发起实测时页面与旧版完全一致，既有核验/费力格选路行为不受影响。

@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, findShortestPath } from "./api";
+import {
+  ApiError,
+  advanceWalkTrial,
+  createWalkTrial,
+  findShortestPath,
+} from "./api";
 import type { GridPlanRequest } from "../types";
 
 const VALID_PLAN: GridPlanRequest = {
@@ -132,5 +137,115 @@ describe("findShortestPath", () => {
     expect(url).toBe("/api/shortest-path");
     expect(init.method).toBe("POST");
     expect(JSON.parse(init.body)).toEqual(VALID_PLAN);
+  });
+});
+
+describe("通行实测 API", () => {
+  const trialProgress = {
+    id: "t1",
+    status: "in_progress",
+    path: [
+      { row: 0, col: 0 },
+      { row: 0, col: 1 },
+    ],
+    totalSteps: 1,
+    checkpoint: 0,
+    nextCoordinate: { row: 0, col: 1 },
+    elapsedSeconds: 0,
+    totalSeconds: null,
+    progressPercent: 0,
+    remainingSteps: 1,
+    completed: false,
+    segments: [],
+    createdAt: "2026-01-01T00:00:00Z",
+  };
+
+  it("createWalkTrial 只提交路线快照", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify(trialProgress), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createWalkTrial(trialProgress.path);
+    expect(result.id).toBe("t1");
+    expect(result.nextCoordinate).toEqual({ row: 0, col: 1 });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/walk-trials");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({ path: trialProgress.path });
+  });
+
+  it("advanceWalkTrial 提交秒数并返回推进后进度", async () => {
+    const after = {
+      ...trialProgress,
+      status: "completed",
+      checkpoint: 1,
+      nextCoordinate: null,
+      elapsedSeconds: 42,
+      totalSeconds: 42,
+      progressPercent: 100,
+      remainingSteps: 0,
+      completed: true,
+      segments: [{ step: 1, row: 0, col: 1, seconds: 42 }],
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify(after), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await advanceWalkTrial("t1", 42);
+    expect(result.completed).toBe(true);
+    expect(result.totalSeconds).toBe(42);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/walk-trials/t1/advance");
+    expect(JSON.parse(init.body)).toEqual({ seconds: 42 });
+  });
+
+  it("秒数非法返回 422 时抛出字段级 ApiError", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              detail: [{ field: "seconds", message: "秒数必须在 1 至 3600 之间" }],
+            }),
+            { status: 422, headers: { "Content-Type": "application/json" } }
+          )
+        )
+      )
+    );
+    const err = await advanceWalkTrial("t1", 0).catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).fieldErrors[0].field).toBe("seconds");
+  });
+
+  it("实测编号不存在返回 422 时定位到 trialId", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              detail: [{ field: "trialId", message: "实测编号不存在：nope" }],
+            }),
+            { status: 422, headers: { "Content-Type": "application/json" } }
+          )
+        )
+      )
+    );
+    const err = await advanceWalkTrial("nope", 10).catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).fieldErrors[0].field).toBe("trialId");
   });
 });

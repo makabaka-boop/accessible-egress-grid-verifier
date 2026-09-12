@@ -1,4 +1,5 @@
 import type { PathResult } from "../types";
+import { WalkTrialPanel } from "./WalkTrialPanel";
 
 interface ResultPanelProps {
   result: PathResult;
@@ -55,6 +56,9 @@ export function ResultPanel({ result }: ResultPanelProps) {
           ))}
         </ol>
       </details>
+
+      {/* 通行实测：核验通过后才能发起；反馈留在本面板，不清除上方路线 */}
+      <WalkTrialPanel snapshot={result.path} />
     </section>
   );
 }

@@ -138,6 +138,73 @@ test("场景③：等代价路线稳定命中约定路径（右右下下，不�
   await expect(page.locator('[data-testid="cell-1-0"].cell-path')).toHaveCount(0);
 });
 
+test("场景⑤：核验贯通到通行实测——逐格计时、进度持续更新、出口锁定总耗时且原路线保留", async ({
+  page,
+}) => {
+  // 1 行向 3 格：起点 (0,0)、出口 (0,2)，路线 (0,0)→(0,1)→(0,2)，共 2 段
+  await page.getByLabel("行数").fill("2");
+  await page.getByLabel("列数").fill("3");
+  await page.getByRole("button", { name: "应用尺寸" }).click();
+  await page.getByRole("button", { name: /① 起点/ }).click();
+  await page.getByTestId("cell-0-0").click();
+  await page.getByRole("button", { name: /② 出口/ }).click();
+  await page.getByTestId("cell-0-2").click();
+  await page.getByTestId("verify-button").click();
+
+  await expect(page.getByTestId("result-ok")).toBeVisible();
+  await expect(page.getByTestId("result-steps")).toHaveText("2");
+  // 核验通过后才出现通行实测入口
+  await expect(page.getByTestId("walk-start-button")).toBeVisible();
+
+  // 发起实测：检查点停在起点，下一格是 (0,1)，累计 0、进度 0/2
+  await page.getByTestId("walk-start-button").click();
+  await expect(page.getByTestId("walk-running")).toBeVisible();
+  await expect(page.getByTestId("walk-next")).toHaveText("(0, 1)");
+  await expect(page.getByTestId("walk-elapsed")).toHaveText("0");
+  await expect(page.getByTestId("walk-percent")).toContainText("0/2");
+
+  // 非法秒数（0）：反馈留在实测面板，且不推进
+  await page.getByTestId("walk-seconds-input").fill("0");
+  await page.getByTestId("walk-advance-button").click();
+  await expect(page.getByTestId("walk-errors")).toContainText("[seconds]");
+  await expect(page.getByTestId("walk-elapsed")).toHaveText("0");
+  // 原路线与核验结果不受影响
+  await expect(page.locator('[data-testid="cell-0-1"].cell-path')).toHaveCount(1);
+  await expect(page.getByTestId("result-ok")).toBeVisible();
+
+  // 第 1 段：10 秒 → 到达 (0,1)
+  await page.getByTestId("walk-seconds-input").fill("10");
+  await page.getByTestId("walk-advance-button").click();
+  await expect(page.getByTestId("walk-next")).toHaveText("(0, 2)");
+  await expect(page.getByTestId("walk-elapsed")).toHaveText("10");
+  await expect(page.getByTestId("walk-percent")).toContainText("1/2");
+
+  // 第 2 段：20 秒 → 到达出口，锁定总耗时 30 秒
+  await page.getByTestId("walk-seconds-input").fill("20");
+  await page.getByTestId("walk-advance-button").click();
+  await expect(page.getByTestId("walk-locked")).toBeVisible();
+  await expect(page.getByTestId("walk-total")).toHaveText("30");
+  await expect(page.getByTestId("walk-percent")).toContainText("2/2");
+  // 完成后不再展示推进控件
+  await expect(page.getByTestId("walk-advance-button")).toHaveCount(0);
+  await expect(page.getByTestId("walk-seconds-input")).toHaveCount(0);
+  // 逐段落库回显与累计一致
+  await page.getByText("逐段秒数").click();
+  await expect(page.getByTestId("walk-sum")).toContainText("10 + 20 = 30");
+  // 整个实测过程中画布上的原路线始终保留、未被清除（一次轮询，避免逐格断言叠加超时）
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() =>
+          ["cell-0-0", "cell-0-1", "cell-0-2"].every(
+            (id) => document.querySelector(`[data-testid="${id}"].cell-path`) !== null
+          )
+        ),
+      { timeout: 5000 }
+    )
+    .toBe(true);
+});
+
 test("场景④：非法重叠返回字段错误时清空旧轨迹并高亮对应费力格", async ({ page }) => {
   await page.getByLabel("行数").fill("3");
   await page.getByLabel("列数").fill("3");

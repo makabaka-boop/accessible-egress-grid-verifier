@@ -252,6 +252,107 @@ input[aria-invalid="true"] {
   margin: 6px 0;
 }
 
+/* 通行实测面板 */
+.panel-walk {
+  background: #f5f8ff;
+  border-color: #93b4f5;
+  margin-top: 14px;
+}
+
+.walk-start {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.walk-id {
+  word-break: break-all;
+}
+
+.walk-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin: 8px 0;
+}
+
+.walk-stats .result-line {
+  margin: 0;
+}
+
+.walk-locked {
+  font-size: 16px;
+  color: #14532d;
+}
+
+.walk-locked strong {
+  font-size: 20px;
+  color: var(--start);
+}
+
+.walk-progress {
+  position: relative;
+  height: 26px;
+  background: #e2e8f0;
+  border-radius: 13px;
+  overflow: hidden;
+  margin: 8px 0;
+}
+
+.walk-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: linear-gradient(90deg, #60a5fa, #2563eb);
+  transition: width 0.2s ease;
+}
+
+.walk-progress-text {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  font-size: 13px;
+  font-weight: 600;
+  color: #0f2a63;
+}
+
+.walk-action {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+  margin: 8px 0;
+}
+
+.walk-action label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 14px;
+}
+
+.walk-segments {
+  margin-top: 6px;
+}
+
+.walk-errors {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  background: var(--error-bg);
+  border: 1px solid var(--error-border);
+  border-radius: 6px;
+}
+
+.walk-errors li {
+  margin: 3px 0;
+  color: #991b1b;
+  font-size: 14px;
+}
+
 /* 网格 */
 .grid-wrap {
   margin-top: 14px;
