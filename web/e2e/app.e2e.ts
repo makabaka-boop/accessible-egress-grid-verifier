@@ -205,6 +205,57 @@ test("场景⑤：核验贯通到通行实测——逐格计时、进度持续�
     .toBe(true);
 });
 
+test("场景⑥：两名核验员同时确认同一实测——两次请求都成功、检查点前进两格且无服务器错误", async ({
+  page,
+}) => {
+  // 3 格 2 段，两个并发确认都应落库并到达出口
+  await page.getByLabel("行数").fill("2");
+  await page.getByLabel("列数").fill("3");
+  await page.getByRole("button", { name: "应用尺寸" }).click();
+  await page.getByRole("button", { name: /① 起点/ }).click();
+  await page.getByTestId("cell-0-0").click();
+  await page.getByRole("button", { name: /② 出口/ }).click();
+  await page.getByTestId("cell-0-2").click();
+  await page.getByTestId("verify-button").click();
+  await expect(page.getByTestId("result-ok")).toBeVisible();
+
+  await page.getByTestId("walk-start-button").click();
+  await expect(page.getByTestId("walk-running")).toBeVisible();
+  const trialId = (await page.getByTestId("walk-id").textContent())?.replace(
+    "实测编号：",
+    ""
+  ).trim() as string;
+  expect(trialId.length).toBeGreaterThan(8);
+
+  // 在页面内对同一次实测同时发起两个推进请求（模拟两名现场人员同时确认）
+  const outcomes = await page.evaluate(async (id) => {
+    const settle = await Promise.all(
+      [10, 20].map((seconds) =>
+        fetch(`/api/walk-trials/${id}/advance`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ seconds }),
+        }).then(async (r) => ({ status: r.status, body: await r.json() }))
+      )
+    );
+    return settle;
+  }, trialId);
+
+  // 两个请求都必须成功，绝不能出现 5xx
+  for (const o of outcomes) {
+    expect(o.status).toBe(200);
+  }
+  const checkpoints = outcomes.map((o) => o.body.checkpoint).sort();
+  expect(checkpoints).toEqual([1, 2]);
+  const final = outcomes.find((o) => o.body.completed)?.body;
+  expect(final).toBeTruthy();
+  expect(final.totalSeconds).toBe(30);
+  expect(final.elapsedSeconds).toBe(30);
+  expect(final.segments.map((s: { seconds: number }) => s.seconds).sort()).toEqual([10, 20]);
+  // 两段 step 唯一连续，没有唯一键冲突导致的丢失
+  expect(final.segments.map((s: { step: number }) => s.step).sort()).toEqual([1, 2]);
+});
+
 test("场景④：非法重叠返回字段错误时清空旧轨迹并高亮对应费力格", async ({ page }) => {
   await page.getByLabel("行数").fill("3");
   await page.getByLabel("列数").fill("3");

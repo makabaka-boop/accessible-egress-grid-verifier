@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app, get_connection
-from app.walk import run_migrations
+from app.walk import _connect, run_migrations
 
 
 @pytest.fixture()
@@ -22,9 +23,8 @@ def client(tmp_path):
     db_path = tmp_path / "walk_test.db"
 
     def override_get_connection():
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
+        # 与生产一致：autocommit + busy_timeout + 显式立即事务
+        conn = _connect(str(db_path))
         run_migrations(conn)
         try:
             yield conn
@@ -301,6 +301,178 @@ def test_each_segment_is_inserted_in_its_own_request(client):
             (tid,),
         ).fetchall()
     assert [(r["step_index"], r["seconds"]) for r in segs] == [(1, 11), (2, 22)]
+
+
+# -------------------------------------------------------------------------- #
+# 并发：两名现场人员同时确认同一次实测
+# -------------------------------------------------------------------------- #
+
+
+def _parallel_advance(client, tid: str, seconds_list: list[int]) -> list:
+    """用多个线程几乎同时发起推进请求，收集各自的 (status, body)。"""
+
+    results: list = [None] * len(seconds_list)
+    barrier = threading.Barrier(len(seconds_list))
+
+    def worker(index: int, seconds: int) -> None:
+        # 等所有线程就绪后同时放行，最大化“读到同一检查点”的竞争窗口
+        barrier.wait()
+        res = advance(client, tid, seconds)
+        results[index] = (res.status_code, res.json())
+
+    threads = [
+        threading.Thread(target=worker, args=(i, s))
+        for i, s in enumerate(seconds_list)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return results
+
+
+def test_two_simultaneous_confirms_both_succeed_no_500(client):
+    """两名核验员同时确认同一次实测：两个请求都成功，各推进一格，不 500。"""
+    trial = create_trial(
+        client,
+        [
+            {"row": 0, "col": 0},
+            {"row": 0, "col": 1},
+            {"row": 0, "col": 2},
+        ],
+    )
+    tid = trial["id"]
+
+    statuses_bodies = _parallel_advance(client, tid, [10, 20])
+    statuses = [s for s, _ in statuses_bodies]
+
+    # 两个请求都必须是成功，绝不能出现 500
+    assert statuses == [200, 200], statuses_bodies
+
+    with open_db(client) as conn:
+        row = conn.execute(
+            "SELECT * FROM walk_trials WHERE id = ?", (tid,)
+        ).fetchone()
+        detail = conn.execute(
+            "SELECT step_index, row, col, seconds FROM walk_segments "
+            "WHERE trial_id = ? ORDER BY step_index",
+            (tid,),
+        ).fetchall()
+
+    # 两次确认都落库：检查点前进 2 格（到达出口），总耗时锁定为两者之和
+    assert row["checkpoint"] == 2
+    assert row["completed"] == 1
+    assert row["elapsed_seconds"] == 30
+    assert row["total_seconds"] == 30
+
+    # 两个请求各写一段、step 唯一连续（没有唯一键冲突/丢失更新）；
+    # 先拿到写锁的请求写 step1，所以秒数到段的归属取决于提交顺序，
+    # 但 step1/step2 的坐标固定为路线第 1、2 格，秒数集合恒为 {10,20}。
+    assert [r["step_index"] for r in detail] == [1, 2]
+    assert [(r["row"], r["col"]) for r in detail] == [(0, 1), (0, 2)]
+    assert sorted(r["seconds"] for r in detail) == [10, 20]
+
+
+def test_two_simultaneous_confirms_on_one_step_trial(client):
+    """单段路线同时收到两个确认：一个走完锁定，另一个得到 completed 422。
+
+    两次确认都不应 500；先拿到写锁的请求把它的秒数锁定，另一个被拒不落库。
+    """
+    trial = create_trial(client, [{"row": 0, "col": 0}, {"row": 1, "col": 0}])
+    tid = trial["id"]
+
+    statuses_bodies = _parallel_advance(client, tid, [12, 34])
+    statuses = sorted(s for s, _ in statuses_bodies)
+
+    # 恰好一个 200、一个 422（不允许出现 500）
+    assert statuses == [200, 422], statuses_bodies
+    # 422 必须是字段级的 completed 错误，而不是服务器错误
+    blocked = [b for s, b in statuses_bodies if s == 422][0]
+    assert any(e["field"] == "completed" for e in blocked["detail"])
+
+    with open_db(client) as conn:
+        row = conn.execute(
+            "SELECT * FROM walk_trials WHERE id = ?", (tid,)
+        ).fetchone()
+        segs = conn.execute(
+            "SELECT seconds FROM walk_segments WHERE trial_id = ?", (tid,)
+        ).fetchall()
+
+    assert row["completed"] == 1
+    assert row["checkpoint"] == 1
+    # 只有先拿到锁的那次确认落库并锁定（12 或 34 取决于提交顺序）；
+    # 被拒的另一个秒数绝不能写入。
+    assert len(segs) == 1
+    locked = segs[0]["seconds"]
+    assert locked in (12, 34)
+    assert row["total_seconds"] == locked
+    assert row["elapsed_seconds"] == locked
+
+
+def test_three_simultaneous_confirms_advance_three_steps(client):
+    """三段路线同时三个确认：全部 200，检查点一次到位且无丢失更新。"""
+    trial = create_trial(
+        client,
+        [
+            {"row": 0, "col": 0},
+            {"row": 0, "col": 1},
+            {"row": 0, "col": 2},
+            {"row": 0, "col": 3},
+        ],
+    )
+    tid = trial["id"]
+
+    statuses_bodies = _parallel_advance(client, tid, [5, 7, 9])
+    assert [s for s, _ in statuses_bodies] == [200, 200, 200], statuses_bodies
+
+    with open_db(client) as conn:
+        row = conn.execute(
+            "SELECT * FROM walk_trials WHERE id = ?", (tid,)
+        ).fetchone()
+        segs = conn.execute(
+            "SELECT step_index, seconds FROM walk_segments "
+            "WHERE trial_id = ? ORDER BY step_index",
+            (tid,),
+        ).fetchall()
+
+    assert row["checkpoint"] == 3
+    assert row["completed"] == 1
+    assert row["total_seconds"] == 21
+    # 每段的 step_index 唯一且连续（没有唯一键冲突导致的丢失）
+    assert [r["step_index"] for r in segs] == [1, 2, 3]
+    # 三个秒数全部落库、各占一段（提交顺序不影响总和与多集合）
+    assert sorted(r["seconds"] for r in segs) == [5, 7, 9]
+
+
+def test_concurrent_unknown_id_and_valid_advance_do_not_cross(client):
+    """并发中一个编号不存在、一个正常推进：互不影响，各自 422/200。"""
+    trial = create_trial(
+        client,
+        [{"row": 0, "col": 0}, {"row": 0, "col": 1}, {"row": 0, "col": 2}],
+    )
+    tid = trial["id"]
+    barrier = threading.Barrier(2)
+    results = {}
+
+    def valid_worker():
+        barrier.wait()
+        res = advance(client, tid, 11)
+        results["valid"] = (res.status_code, res.json())
+
+    def unknown_worker():
+        barrier.wait()
+        res = advance(client, "f" * 32, 11)
+        results["unknown"] = (res.status_code, res.json())
+
+    t1 = threading.Thread(target=valid_worker)
+    t2 = threading.Thread(target=unknown_worker)
+    t1.start(); t2.start()
+    t1.join(); t2.join()
+
+    assert results["valid"][0] == 200
+    assert results["valid"][1]["checkpoint"] == 1
+    assert results["unknown"][0] == 422
+    assert any(e["field"] == "trialId" for e in results["unknown"][1]["detail"])
 
 
 # -------------------------------------------------------------------------- #

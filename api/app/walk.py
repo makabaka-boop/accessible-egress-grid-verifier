@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -90,23 +91,50 @@ def _connect(db_path: str) -> sqlite3.Connection:
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
     # FastAPI 的同步依赖在线程池中执行、TestClient 又跨 anyio 门户线程，
     # 每次请求各自一条连接；关闭同线程限制即可安全使用。
-    conn = sqlite3.connect(db_path, timeout=10, check_same_thread=False)
+    # isolation_level=None（autocommit）：事务由 _immediate_txn 显式控制，
+    # 避免隐式事务在并发写时产生意外的“先读后锁”窗口。
+    conn = sqlite3.connect(
+        db_path, timeout=10, check_same_thread=False, isolation_level=None
+    )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # 并发写时第二个事务等待写锁，最长等 10 秒后才报 SQLITE_BUSY。
+    conn.execute("PRAGMA busy_timeout = 10000")
     return conn
+
+
+@contextlib.contextmanager
+def _immediate_txn(conn: sqlite3.Connection):
+    """``BEGIN IMMEDIATE`` 立即取写锁的事务：把同一次实测的推进串行化。
+
+    两名现场人员同时确认同一次实测时，两个请求各自持有连接：先进入的
+    事务拿到写锁，后到的事务在忙等待后才开始，因此锁内能读到上一个请求
+    已提交的最新检查点，两次确认依次落库——既不会 500，也不会只前进一格。
+    任意业务错误（:class:`WalkError`）都回滚，不写入任何分段。
+    """
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+    except BaseException:
+        conn.rollback()
+        raise
+    else:
+        conn.commit()
 
 
 def run_migrations(conn: sqlite3.Connection) -> None:
     """按 ``PRAGMA user_version`` 顺序执行建表迁移（幂等）。"""
 
-    current = conn.execute("PRAGMA user_version").fetchone()[0]
-    for version, statements in _MIGRATIONS:
-        if version <= current:
-            continue
-        for statement in statements:
-            conn.execute(statement)
-        conn.execute(f"PRAGMA user_version = {version}")
-    conn.commit()
+    # 迁移本身幂等且通常只在首次执行，用一个立即事务包住避免并发首启竞争。
+    with _immediate_txn(conn):
+        current = conn.execute("PRAGMA user_version").fetchone()[0]
+        for version, statements in _MIGRATIONS:
+            if version <= current:
+                continue
+            for statement in statements:
+                conn.execute(statement)
+            conn.execute(f"PRAGMA user_version = {version}")
 
 
 def get_connection():
@@ -295,16 +323,16 @@ def create_trial(conn: sqlite3.Connection, model: WalkTrialCreate) -> dict[str, 
     now = datetime.now(timezone.utc).isoformat()
     total_steps = len(path) - 1
 
-    conn.execute(
-        """
-        INSERT INTO walk_trials
-            (id, created_at, path_snapshot, total_steps, checkpoint,
-             elapsed_seconds, total_seconds, completed)
-        VALUES (?, ?, ?, ?, 0, 0, NULL, 0)
-        """,
-        (trial_id, now, json.dumps(path, ensure_ascii=False), total_steps),
-    )
-    conn.commit()
+    with _immediate_txn(conn):
+        conn.execute(
+            """
+            INSERT INTO walk_trials
+                (id, created_at, path_snapshot, total_steps, checkpoint,
+                 elapsed_seconds, total_seconds, completed)
+            VALUES (?, ?, ?, ?, 0, 0, NULL, 0)
+            """,
+            (trial_id, now, json.dumps(path, ensure_ascii=False), total_steps),
+        )
     progress = _load_progress(conn, trial_id)
     assert progress is not None
     return progress
@@ -316,48 +344,57 @@ def advance_trial(conn: sqlite3.Connection, trial_id: str, seconds: int) -> dict
     * 编号不存在 → 422（trialId 字段），不写任何数据；
     * 已完成仍推进 → 422（completed 字段），不写任何数据；
     * 成功 → 返回推进后的完整进度；最后一段确认后锁定总耗时。
+
+    整个“读当前检查点 → 插分段 → 推进”过程放在 ``BEGIN IMMEDIATE`` 写
+    事务内，锁内读到的一定是已提交的最新检查点。两名核验员同时确认同一
+    次实测时，两个请求串行提交：第一次写 step k+1，第二次在锁释放后读到
+    新检查点并写 step k+2，各前进一格、互不覆盖，也不会因
+    ``UNIQUE(trial_id, step_index)`` 冲突而 500。
     """
 
-    trial = conn.execute("SELECT * FROM walk_trials WHERE id = ?", (trial_id,)).fetchone()
-    if trial is None:
-        raise WalkError([_err("trialId", f"实测编号不存在：{trial_id}")])
-    if trial["completed"]:
-        raise WalkError(
-            [_err("completed", "该实测已到达出口并锁定总耗时，不能继续推进；如需重测请发起新实测")]
+    with _immediate_txn(conn):
+        # 锁内重读：拿到的一定是此前已提交事务推进后的最新状态
+        trial = conn.execute(
+            "SELECT * FROM walk_trials WHERE id = ?", (trial_id,)
+        ).fetchone()
+        if trial is None:
+            raise WalkError([_err("trialId", f"实测编号不存在：{trial_id}")])
+        if trial["completed"]:
+            raise WalkError(
+                [_err("completed", "该实测已到达出口并锁定总耗时，不能继续推进；如需重测请发起新实测")]
+            )
+
+        checkpoint = trial["checkpoint"]
+        total_steps = trial["total_steps"]
+        path = json.loads(trial["path_snapshot"])
+        # 当前位于 path[checkpoint]，本次确认到达下一格 path[checkpoint + 1]
+        next_index = checkpoint + 1
+        target = path[next_index]
+        now = datetime.now(timezone.utc).isoformat()
+
+        conn.execute(
+            """
+            INSERT INTO walk_segments
+                (trial_id, step_index, row, col, seconds, recorded_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (trial_id, next_index, target["row"], target["col"], seconds, now),
         )
 
-    checkpoint = trial["checkpoint"]
-    total_steps = trial["total_steps"]
-    path = json.loads(trial["path_snapshot"])
-    # 当前位于 path[checkpoint]，本次确认到达下一格 path[checkpoint + 1]
-    next_index = checkpoint + 1
-    target = path[next_index]
-    now = datetime.now(timezone.utc).isoformat()
-
-    conn.execute(
-        """
-        INSERT INTO walk_segments
-            (trial_id, step_index, row, col, seconds, recorded_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (trial_id, next_index, target["row"], target["col"], seconds, now),
-    )
-
-    new_elapsed = trial["elapsed_seconds"] + seconds
-    completed = next_index >= total_steps
-    conn.execute(
-        """
-        UPDATE walk_trials
-           SET checkpoint = ?,
-               elapsed_seconds = ?,
-               total_seconds = CASE WHEN ? = 1 THEN ? ELSE total_seconds END,
-               completed = ?
-         WHERE id = ?
-        """,
-        (next_index, new_elapsed, 1 if completed else 0, new_elapsed,
-         1 if completed else 0, trial_id),
-    )
-    conn.commit()
+        new_elapsed = trial["elapsed_seconds"] + seconds
+        completed = next_index >= total_steps
+        conn.execute(
+            """
+            UPDATE walk_trials
+               SET checkpoint = ?,
+                   elapsed_seconds = ?,
+                   total_seconds = CASE WHEN ? = 1 THEN ? ELSE total_seconds END,
+                   completed = ?
+             WHERE id = ?
+            """,
+            (next_index, new_elapsed, 1 if completed else 0, new_elapsed,
+             1 if completed else 0, trial_id),
+        )
 
     progress = _load_progress(conn, trial_id)
     assert progress is not None

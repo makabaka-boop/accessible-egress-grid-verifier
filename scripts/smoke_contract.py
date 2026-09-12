@@ -16,6 +16,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 API = os.environ.get("API_BASE_URL", "http://localhost:8000").rstrip("/")
 WEB = os.environ.get("WEB_BASE_URL", "http://localhost:8080").rstrip("/")
@@ -264,6 +265,33 @@ request(f"{API}/api/walk-trials/{other_id}/advance", {"seconds": 5})
 status, body = request(f"{API}/api/walk-trials/{other_id}/advance", {"seconds": 7})
 check("另一条实测独立锁定为 12，不与前一条 35 串数据",
       status == 200 and body.get("completed") is True and body.get("totalSeconds") == 12)
+
+print("== 通行实测：两名核验员同时确认同一次实测（并发推进，不得 500/丢更新） ==")
+concurrent_path = [
+    {"row": 0, "col": 0},
+    {"row": 0, "col": 1},
+    {"row": 0, "col": 2},
+]
+status, body = request(f"{API}/api/walk-trials", {"path": concurrent_path})
+ctid = body.get("id")
+
+
+def advance_seconds(seconds: int) -> tuple[int, dict]:
+    return request(f"{API}/api/walk-trials/{ctid}/advance", {"seconds": seconds})
+
+
+with ThreadPoolExecutor(max_workers=2) as pool:
+    c_results = list(pool.map(advance_seconds, (10, 20)))
+c_status = sorted(code for code, _ in c_results)
+c_final = [b for _, b in c_results if b.get("completed")]
+check("并发的两个推进请求都成功（无 5xx）", c_status == [200, 200], str(c_status))
+check(
+    "并发后检查点前进两格、总耗时锁定 30、两段都落库",
+    c_status == [200, 200]
+    and len(c_final) == 1
+    and c_final[0].get("totalSeconds") == 30
+    and sorted(s.get("seconds") for s in c_final[0].get("segments", [])) == [10, 20],
+)
 
 print("== 通行实测经 web /api 代理同样可用 ==")
 status, body = request(f"{WEB}/api/walk-trials", {"path": walk_path})
