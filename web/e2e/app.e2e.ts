@@ -256,6 +256,64 @@ test("场景⑥：两名核验员同时确认同一实测——两次请求都�
   expect(final.segments.map((s: { step: number }) => s.step).sort()).toEqual([1, 2]);
 });
 
+test("场景⑦：设定单段目标——非法目标保留可修正，超时段即时标记直至完成汇总", async ({
+  page,
+}) => {
+  // 1 行向 3 格：起点 (0,0)、出口 (0,2)，路线 (0,0)→(0,1)→(0,2)，共 2 段
+  await page.getByLabel("行数").fill("2");
+  await page.getByLabel("列数").fill("3");
+  await page.getByRole("button", { name: "应用尺寸" }).click();
+  await page.getByRole("button", { name: /① 起点/ }).click();
+  await page.getByTestId("cell-0-0").click();
+  await page.getByRole("button", { name: /② 出口/ }).click();
+  await page.getByTestId("cell-0-2").click();
+  await page.getByTestId("verify-button").click();
+  await expect(page.getByTestId("result-ok")).toBeVisible();
+  await expect(page.getByTestId("walk-start-button")).toBeVisible();
+
+  // 目标值非法（0）：反馈留在实测面板、不发起实测，已核验路线与填写值保留
+  await page.getByTestId("walk-target-input").fill("0");
+  await page.getByTestId("walk-start-button").click();
+  await expect(page.getByTestId("walk-errors")).toContainText("[targetSeconds]");
+  await expect(page.getByTestId("walk-target-input")).toHaveValue("0");
+  await expect(page.getByTestId("walk-running")).toHaveCount(0);
+  await expect(page.locator('[data-testid="cell-0-1"].cell-path')).toHaveCount(1);
+  await expect(page.getByTestId("result-ok")).toBeVisible();
+
+  // 修正为 15 秒后发起：面板显示落库目标，初始汇总为零
+  await page.getByTestId("walk-target-input").fill("15");
+  await page.getByTestId("walk-start-button").click();
+  await expect(page.getByTestId("walk-running")).toBeVisible();
+  await expect(page.getByTestId("walk-target-display")).toHaveText("15");
+  await expect(page.getByTestId("walk-verdict-summary")).toBeVisible();
+  await expect(page.getByTestId("walk-ontarget-count")).toContainText("0");
+  await expect(page.getByTestId("walk-overtime-count")).toContainText("0");
+
+  // 第 1 段 10 秒（≤15 达标）：汇总即时更新，坐标为 (0,1)
+  await page.getByTestId("walk-seconds-input").fill("10");
+  await page.getByTestId("walk-advance-button").click();
+  await expect(page.getByTestId("walk-ontarget-count")).toContainText("1");
+  await expect(page.getByTestId("walk-overtime-count")).toContainText("0");
+  await expect(page.getByTestId("walk-ontarget-coords")).toContainText("(0, 1)");
+  await expect(page.getByTestId("walk-overtime-coords")).toContainText("无");
+
+  // 第 2 段 20 秒（>15 超时）：到达出口锁定总耗时，汇总含超时坐标 (0,2)
+  await page.getByTestId("walk-seconds-input").fill("20");
+  await page.getByTestId("walk-advance-button").click();
+  await expect(page.getByTestId("walk-locked")).toBeVisible();
+  await expect(page.getByTestId("walk-total")).toHaveText("30");
+  await expect(page.getByTestId("walk-overtime-count")).toContainText("1");
+  await expect(page.getByTestId("walk-overtime-coords")).toContainText("(0, 2)");
+  await expect(page.getByTestId("walk-ontarget-coords")).toContainText("(0, 1)");
+
+  // 逐段明细中的判定标记
+  await page.getByText("逐段秒数").click();
+  await expect(page.getByTestId("walk-segment-verdict-1")).toHaveText("达标");
+  await expect(page.getByTestId("walk-segment-verdict-2")).toHaveText("超时");
+  // 原核验路线始终保留
+  await expect(page.locator('[data-testid="cell-0-1"].cell-path')).toHaveCount(1);
+});
+
 test("场景④：非法重叠返回字段错误时清空旧轨迹并高亮对应费力格", async ({ page }) => {
   await page.getByLabel("行数").fill("3");
   await page.getByLabel("列数").fill("3");

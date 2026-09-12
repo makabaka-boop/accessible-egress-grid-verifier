@@ -3,9 +3,12 @@
 核心数据是一次实测的 **不可变路线快照** 与 **当前检查点**：
 
 * ``walk_trials`` 保存实测编号、创建时间、快照（JSON）、总步数、
-  当前检查点序号、累计/总耗时与完成状态；创建后路线永不再变。
+  当前检查点序号、累计/总耗时、完成状态与可选的单段目标秒数；
+  创建后路线与目标永不再变。
 * ``walk_segments`` 逐段保存“从上一检查点进入本格”的实测秒数，
-  推进检查点只做 INSERT，累计时间由这些落库的分段求和得到。
+  推进检查点只做 INSERT，累计时间由这些落库的分段求和得到；
+  设定了目标的实测在读取进度时按“本段秒数 > 目标 → 超时，否则达标”
+  逐段判定，判定结果与落库目标天然一致，无需额外落库。
 
 对外只暴露两个写操作（见 ``main`` 中的路由）：
 ``create_trial`` 与 ``advance_trial``；不提供任何修改/删除接口。
@@ -63,6 +66,16 @@ _MIGRATIONS: list[tuple[int, tuple[str, ...]]] = [
                 UNIQUE (trial_id, step_index),
                 FOREIGN KEY (trial_id) REFERENCES walk_trials (id)
             )
+            """,
+        ),
+    ),
+    (
+        2,
+        (
+            # 可选单段目标秒数固化到实测记录：NULL 表示该实测不做超时/达标
+            # 判定（旧客户端与历史数据的默认形态）。
+            """
+            ALTER TABLE walk_trials ADD COLUMN target_seconds INTEGER
             """,
         ),
     ),
@@ -157,7 +170,8 @@ def validate_create(payload: Any) -> WalkTrialCreate:
     """校验创建实测请求体。
 
     结构（类型/多余字段/坐标非负整数）交给 Pydantic；
-    这里额外要求路线至少两格且相邻坐标仅四方向移动。
+    这里额外要求路线至少两格、相邻坐标仅四方向移动，
+    并校验可选的单段目标秒数（1–3600 的整数，省略则不判定）。
     """
 
     if not isinstance(payload, dict):
@@ -173,6 +187,9 @@ def validate_create(payload: Any) -> WalkTrialCreate:
         raise WalkError(
             [_err("path", f"路线至少需要 2 格（起点与出口），当前只有 {len(raw_path)} 格")]
         )
+
+    # 可选目标秒数：类型/范围非法时定位到 targetSeconds，不产生实测记录
+    parse_target_seconds(payload)
 
     # 结构/类型校验（坐标为严格非负整数、拒绝多余字段）
     try:
@@ -251,6 +268,29 @@ def parse_seconds(payload: Any) -> int:
     return value
 
 
+def parse_target_seconds(payload: dict[str, Any]) -> int | None:
+    """校验创建请求中可选的单段目标秒数。
+
+    省略字段 → 返回 ``None``（不判定，与旧客户端契约一致）；提供时必须是
+    1 至 3600 的整数，整值小数（3.0）、布尔、字符串、显式 null、越界整数
+    一律以 ``targetSeconds`` 字段错误拒绝，且在写库之前失败，
+    不产生任何实测记录。
+    """
+
+    if "targetSeconds" not in payload:
+        return None
+    value = payload["targetSeconds"]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise WalkError(
+            [_err("targetSeconds", f"目标秒数必须是 {MIN_SECONDS} 至 {MAX_SECONDS} 之间的整数")]
+        )
+    if not (MIN_SECONDS <= value <= MAX_SECONDS):
+        raise WalkError(
+            [_err("targetSeconds", f"目标秒数必须在 {MIN_SECONDS} 至 {MAX_SECONDS} 之间，当前为 {value}")]
+        )
+    return value
+
+
 # --------------------------------------------------------------------------- #
 # 序列化
 # --------------------------------------------------------------------------- #
@@ -261,16 +301,52 @@ def _serialize_progress(
     path: list[dict[str, int]],
     segments: list[sqlite3.Row],
 ) -> dict[str, Any]:
-    """构造推进/创建接口共用的完整进度响应。"""
+    """构造推进/创建接口共用的完整进度响应。
+
+    设定了单段目标的实测：每段按“秒数 > 目标 → 超时（overtime），否则
+    达标（on_target）”判定，并给出分类汇总（两类各自的段数与坐标）；
+    未设定目标（旧客户端/历史数据）时 ``verdict`` 与汇总均为 ``null``，
+    响应形态与旧契约一致。
+    """
 
     checkpoint = trial_row["checkpoint"]
     total_steps = trial_row["total_steps"]
     completed = bool(trial_row["completed"])
+    target = trial_row["target_seconds"]
 
-    segment_list = [
-        {"step": seg["step_index"], "row": seg["row"], "col": seg["col"], "seconds": seg["seconds"]}
-        for seg in segments
-    ]
+    segment_list = []
+    for seg in segments:
+        verdict = None
+        if target is not None:
+            verdict = "overtime" if seg["seconds"] > target else "on_target"
+        segment_list.append(
+            {
+                "step": seg["step_index"],
+                "row": seg["row"],
+                "col": seg["col"],
+                "seconds": seg["seconds"],
+                "verdict": verdict,
+            }
+        )
+
+    verdict_summary = None
+    if target is not None:
+        on_target_coords = [
+            {"row": s["row"], "col": s["col"]}
+            for s in segment_list
+            if s["verdict"] == "on_target"
+        ]
+        overtime_coords = [
+            {"row": s["row"], "col": s["col"]}
+            for s in segment_list
+            if s["verdict"] == "overtime"
+        ]
+        verdict_summary = {
+            "onTargetCount": len(on_target_coords),
+            "overtimeCount": len(overtime_coords),
+            "onTargetCoordinates": on_target_coords,
+            "overtimeCoordinates": overtime_coords,
+        }
 
     if not completed:
         # 已确认 checkpoint 段（当前位于 path[checkpoint]），下一格是 path[checkpoint+1]
@@ -290,6 +366,8 @@ def _serialize_progress(
         "nextCoordinate": next_coordinate,
         "elapsedSeconds": trial_row["elapsed_seconds"],
         "totalSeconds": trial_row["total_seconds"],
+        "targetSeconds": target,  # 落库的可选单段目标；未设定为 null
+        "verdictSummary": verdict_summary,  # 超时/达标分类汇总；未设定目标为 null
         "progressPercent": round(checkpoint * 100 / total_steps, 2),
         "remainingSteps": remaining,
         "completed": completed,
@@ -316,7 +394,11 @@ def _load_progress(conn: sqlite3.Connection, trial_id: str) -> dict[str, Any] | 
 
 
 def create_trial(conn: sqlite3.Connection, model: WalkTrialCreate) -> dict[str, Any]:
-    """以不可变路线快照创建一次实测，检查点停在起点（第 0 格）。"""
+    """以不可变路线快照创建一次实测，检查点停在起点（第 0 格）。
+
+    可选的单段目标秒数随实测记录一并落库，之后每次推进的判定都
+    以这个落库值为准（跨请求一致）。
+    """
 
     path = [{"row": cell.row, "col": cell.col} for cell in model.path]
     trial_id = uuid.uuid4().hex
@@ -328,10 +410,11 @@ def create_trial(conn: sqlite3.Connection, model: WalkTrialCreate) -> dict[str, 
             """
             INSERT INTO walk_trials
                 (id, created_at, path_snapshot, total_steps, checkpoint,
-                 elapsed_seconds, total_seconds, completed)
-            VALUES (?, ?, ?, ?, 0, 0, NULL, 0)
+                 elapsed_seconds, total_seconds, completed, target_seconds)
+            VALUES (?, ?, ?, ?, 0, 0, NULL, 0, ?)
             """,
-            (trial_id, now, json.dumps(path, ensure_ascii=False), total_steps),
+            (trial_id, now, json.dumps(path, ensure_ascii=False), total_steps,
+             model.target_seconds),
         )
     progress = _load_progress(conn, trial_id)
     assert progress is not None

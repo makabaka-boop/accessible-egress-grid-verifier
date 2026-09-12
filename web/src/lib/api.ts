@@ -94,9 +94,18 @@ export async function findShortestPath(
 /**
  * 从一次成功核验的路线快照发起通行实测。
  * 只提交不可变路线坐标，不提交整张平面。
+ * 可选的单段目标秒数（1–3600 的整数）随创建一并提交；
+ * 省略时请求体与旧契约完全一致（不携带 targetSeconds 字段）。
  */
-export async function createWalkTrial(path: Cell[]): Promise<WalkTrialProgress> {
-  return (await postJson("/api/walk-trials", { path })) as WalkTrialProgress;
+export async function createWalkTrial(
+  path: Cell[],
+  targetSeconds?: number
+): Promise<WalkTrialProgress> {
+  const body: Record<string, unknown> = { path };
+  if (targetSeconds !== undefined) {
+    body.targetSeconds = targetSeconds;
+  }
+  return (await postJson("/api/walk-trials", body)) as WalkTrialProgress;
 }
 
 /**

@@ -45,12 +45,25 @@ export interface FieldError {
 
 export type Tool = "start" | "exit" | "block" | "difficult" | "erase";
 
+/**单段判定：设定了单段目标后，秒数大于目标为超时，否则为达标。 */
+export type SegmentVerdict = "on_target" | "overtime";
+
 /**一次推进实测后落库返回的单段实测记录。 */
 export interface WalkSegment {
   step: number;
   row: number;
   col: number;
   seconds: number;
+  /**本段判定；未设定单段目标（旧契约）时为 null。 */
+  verdict: SegmentVerdict | null;
+}
+
+/**设定了单段目标时的分类汇总：达标/超时各自的段数与对应坐标。 */
+export interface VerdictSummary {
+  onTargetCount: number;
+  overtimeCount: number;
+  onTargetCoordinates: Cell[];
+  overtimeCoordinates: Cell[];
 }
 
 /**
@@ -71,6 +84,10 @@ export interface WalkTrialProgress {
   elapsedSeconds: number;
   /**到达出口后锁定的总耗时（秒）；进行中为 null。 */
   totalSeconds: number | null;
+  /**创建时落库的可选单段目标秒数；未设定（旧契约）为 null。 */
+  targetSeconds: number | null;
+  /**超时/达标分类汇总；未设定目标时为 null。 */
+  verdictSummary: VerdictSummary | null;
   progressPercent: number;
   remainingSteps: number;
   completed: boolean;

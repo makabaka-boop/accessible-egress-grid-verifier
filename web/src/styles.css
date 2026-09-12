@@ -338,6 +338,44 @@ input[aria-invalid="true"] {
   margin-top: 6px;
 }
 
+.walk-target-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 14px;
+  max-width: 260px;
+  margin: 6px 0;
+}
+
+.walk-verdicts {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border, #d4d4d8);
+  border-radius: 6px;
+  background: var(--panel-bg, #fafafa);
+}
+
+.walk-verdict-overtime {
+  color: #b45309;
+}
+
+.walk-badge {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.walk-badge-ontarget {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.walk-badge-overtime {
+  background: #fef3c7;
+  color: #b45309;
+}
+
 .walk-errors {
   list-style: none;
   margin: 8px 0 0;

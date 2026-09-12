@@ -180,6 +180,49 @@ describe("通行实测 API", () => {
     expect(JSON.parse(init.body)).toEqual({ path: trialProgress.path });
   });
 
+  it("createWalkTrial 携带可选单段目标秒数", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            ...trialProgress,
+            targetSeconds: 30,
+            verdictSummary: {
+              onTargetCount: 0,
+              overtimeCount: 0,
+              onTargetCoordinates: [],
+              overtimeCoordinates: [],
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createWalkTrial(trialProgress.path, 30);
+    expect(result.targetSeconds).toBe(30);
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(init.body)).toEqual({ path: trialProgress.path, targetSeconds: 30 });
+  });
+
+  it("createWalkTrial 省略目标时请求体不含 targetSeconds（旧契约）", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify(trialProgress), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createWalkTrial(trialProgress.path);
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(init.body)).toEqual({ path: trialProgress.path });
+    expect("targetSeconds" in JSON.parse(init.body)).toBe(false);
+  });
+
   it("advanceWalkTrial 提交秒数并返回推进后进度", async () => {
     const after = {
       ...trialProgress,

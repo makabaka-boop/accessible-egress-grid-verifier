@@ -213,7 +213,9 @@ def test_advance_accumulates_across_requests(client):
     assert first["progressPercent"] == 25.0
     assert first["remainingSteps"] == 3
     assert first["nextCoordinate"] == {"row": 0, "col": 2}
-    assert first["segments"] == [{"step": 1, "row": 0, "col": 1, "seconds": 12}]
+    assert first["segments"] == [
+        {"step": 1, "row": 0, "col": 1, "seconds": 12, "verdict": None}
+    ]
 
     # 全新请求，状态来自落库快照
     second = advance(client, tid, 8).json()
@@ -584,6 +586,143 @@ def test_invalid_seconds_after_completion_does_not_change_lock(client):
 
 
 # -------------------------------------------------------------------------- #
+# 单段目标秒数：创建校验、逐段判定与跨请求同一落库目标
+# -------------------------------------------------------------------------- #
+
+
+def create_trial_with_target(client, path, target) -> dict:
+    res = client.post("/api/walk-trials", json={"path": path, "targetSeconds": target})
+    assert res.status_code == 200, res.text
+    return res.json()
+
+
+def test_create_with_target_persists_and_echoes(client):
+    data = create_trial_with_target(client, path2(), 30)
+    assert data["targetSeconds"] == 30
+    assert data["checkpoint"] == 0
+    assert data["segments"] == []
+    # 目标已设定但尚无分段：汇总为零计数的空判定
+    assert data["verdictSummary"] == {
+        "onTargetCount": 0,
+        "overtimeCount": 0,
+        "onTargetCoordinates": [],
+        "overtimeCoordinates": [],
+    }
+    with open_db(client) as conn:
+        row = conn.execute(
+            "SELECT target_seconds FROM walk_trials WHERE id = ?", (data["id"],)
+        ).fetchone()
+    assert row["target_seconds"] == 30
+
+
+@pytest.mark.parametrize("boundary", [1, 3600])
+def test_create_with_boundary_target_accepted(client, boundary):
+    data = create_trial_with_target(client, path2(), boundary)
+    assert data["targetSeconds"] == boundary
+
+
+@pytest.mark.parametrize("bad", [0, -5, 3601, 1.5, 3.0, "60", True, None, [], {}])
+def test_create_rejects_invalid_target_without_record(client, bad):
+    res = client.post("/api/walk-trials", json={"path": path2(), "targetSeconds": bad})
+    assert res.status_code == 422
+    detail = res.json()["detail"]
+    assert any(e["field"] == "targetSeconds" for e in detail), detail
+    assert "id" not in res.json()
+    # 不产生任何实测记录
+    with open_db(client) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM walk_trials").fetchone()[0] == 0
+
+
+def test_create_without_target_keeps_legacy_shape(client):
+    """旧客户端省略目标值：无分段判定与汇总，契约与旧版一致。"""
+    trial = create_trial(client, path2())
+    assert trial["targetSeconds"] is None
+    assert trial["verdictSummary"] is None
+
+    done = trial
+    for s in (12, 8, 100, 5):
+        done = advance(client, trial["id"], s).json()
+    assert done["completed"] is True
+    assert done["targetSeconds"] is None
+    assert done["verdictSummary"] is None
+    assert all(seg["verdict"] is None for seg in done["segments"])
+    with open_db(client) as conn:
+        row = conn.execute(
+            "SELECT target_seconds FROM walk_trials WHERE id = ?", (trial["id"],)
+        ).fetchone()
+    assert row["target_seconds"] is None
+
+
+def test_verdicts_come_from_same_persisted_target_across_requests(client):
+    """跨请求判定来自同一落库目标：推进请求不携带目标，判定仍一致。"""
+    trial = create_trial_with_target(client, path2(), 30)
+    tid = trial["id"]
+
+    # 第 1 段 10 秒（≤30 达标）、第 2 段 45 秒（>30 超时）——各自独立请求
+    first = advance(client, tid, 10).json()
+    assert first["targetSeconds"] == 30
+    assert [s["verdict"] for s in first["segments"]] == ["on_target"]
+    assert first["verdictSummary"]["onTargetCount"] == 1
+    assert first["verdictSummary"]["overtimeCount"] == 0
+    assert first["verdictSummary"]["onTargetCoordinates"] == [{"row": 0, "col": 1}]
+
+    second = advance(client, tid, 45).json()
+    assert [s["verdict"] for s in second["segments"]] == ["on_target", "overtime"]
+    assert second["verdictSummary"] == {
+        "onTargetCount": 1,
+        "overtimeCount": 1,
+        "onTargetCoordinates": [{"row": 0, "col": 1}],
+        "overtimeCoordinates": [{"row": 0, "col": 2}],
+    }
+
+    # 边界：恰好等于目标为达标；超出 1 秒即超时
+    third = advance(client, tid, 30).json()
+    assert third["segments"][2]["verdict"] == "on_target"
+    done = advance(client, tid, 31).json()
+    assert done["completed"] is True
+    assert [s["verdict"] for s in done["segments"]] == [
+        "on_target", "overtime", "on_target", "overtime",
+    ]
+    assert done["verdictSummary"]["onTargetCount"] == 2
+    assert done["verdictSummary"]["overtimeCount"] == 2
+    assert done["verdictSummary"]["overtimeCoordinates"] == [
+        {"row": 0, "col": 2},
+        {"row": 2, "col": 2},
+    ]
+
+    # 判定依据是落库目标本身（而非请求参数）：库中目标未变，响应与之同源
+    with open_db(client) as conn:
+        row = conn.execute(
+            "SELECT target_seconds FROM walk_trials WHERE id = ?", (tid,)
+        ).fetchone()
+        segs = conn.execute(
+            "SELECT seconds FROM walk_segments WHERE trial_id = ? ORDER BY step_index",
+            (tid,),
+        ).fetchall()
+    assert row["target_seconds"] == 30
+    expected = ["overtime" if s["seconds"] > 30 else "on_target" for s in segs]
+    assert [s["verdict"] for s in done["segments"]] == expected
+
+
+def test_target_is_immutable_after_creation(client):
+    """推进接口不接受目标字段（多余字段），落库目标永不被改写。"""
+    trial = create_trial_with_target(client, path2(), 20)
+    tid = trial["id"]
+    res = client.post(
+        f"/api/walk-trials/{tid}/advance",
+        json={"seconds": 10, "targetSeconds": 99},
+    )
+    assert res.status_code == 422
+    assert any(e["field"] == "targetSeconds" for e in res.json()["detail"])
+    with open_db(client) as conn:
+        row = conn.execute(
+            "SELECT target_seconds, checkpoint FROM walk_trials WHERE id = ?", (tid,)
+        ).fetchone()
+    assert row["target_seconds"] == 20
+    assert row["checkpoint"] == 0
+
+
+# -------------------------------------------------------------------------- #
 # 迁移与表结构
 # -------------------------------------------------------------------------- #
 
@@ -602,6 +741,42 @@ def test_migrations_are_idempotent(tmp_path):
         ).fetchall()
     }
     assert {"walk_trials", "walk_segments"} <= tables
+    conn.close()
+
+
+def test_migration_v2_adds_target_seconds_to_legacy_db(tmp_path):
+    """v1 旧库升级到 v2：新增 target_seconds 列，历史实测目标为 NULL。"""
+    from app.walk import _MIGRATIONS
+
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    # 模拟只执行过 v1 的旧库：两张表 + 一条历史实测（无目标列）
+    for _, statements in _MIGRATIONS:
+        if _ == 1:
+            for statement in statements:
+                conn.execute(statement)
+    conn.execute("PRAGMA user_version = 1")
+    conn.execute(
+        """
+        INSERT INTO walk_trials
+            (id, created_at, path_snapshot, total_steps, checkpoint,
+             elapsed_seconds, total_seconds, completed)
+        VALUES ('legacy1', '2026-01-01T00:00:00+00:00', '[{"row":0,"col":0},{"row":0,"col":1}]',
+                1, 0, 0, NULL, 0)
+        """
+    )
+    conn.commit()
+
+    run_migrations(conn)
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert version >= 2
+    columns = {
+        r[1] for r in conn.execute("PRAGMA table_info(walk_trials)").fetchall()
+    }
+    assert "target_seconds" in columns
+    row = conn.execute("SELECT target_seconds FROM walk_trials WHERE id = 'legacy1'").fetchone()
+    assert row["target_seconds"] is None  # 历史实测不判定
     conn.close()
 
 

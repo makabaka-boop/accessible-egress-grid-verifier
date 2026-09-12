@@ -293,6 +293,63 @@ check(
     and sorted(s.get("seconds") for s in c_final[0].get("segments", [])) == [10, 20],
 )
 
+print("== 通行实测：单段目标秒数（创建落库 → 逐段超时/达标判定） ==")
+status, body = request(f"{API}/api/walk-trials", {"path": walk_path, "targetSeconds": 15})
+check("携带目标创建实测 status=200", status == 200)
+check(
+    "创建响应回显目标值且初始汇总为零",
+    body.get("targetSeconds") == 15
+    and body.get("verdictSummary", {}).get("onTargetCount") == 0
+    and body.get("verdictSummary", {}).get("overtimeCount") == 0,
+)
+target_id = body.get("id")
+
+status, body = request(f"{API}/api/walk-trials/{target_id}/advance", {"seconds": 10})
+check(
+    "第 1 段 10 秒（≤15）判定达标并即时汇总",
+    status == 200
+    and body.get("segments", [{}])[0].get("verdict") == "on_target"
+    and body.get("verdictSummary", {}).get("onTargetCount") == 1
+    and body.get("verdictSummary", {}).get("onTargetCoordinates") == [{"row": 0, "col": 1}],
+)
+status, body = request(f"{API}/api/walk-trials/{target_id}/advance", {"seconds": 20})
+check(
+    "第 2 段 20 秒（>15）判定超时，完成后汇总含超时坐标",
+    status == 200
+    and body.get("completed") is True
+    and body.get("totalSeconds") == 30
+    and [s.get("verdict") for s in body.get("segments", [])] == ["on_target", "overtime"]
+    and body.get("verdictSummary", {}).get("overtimeCount") == 1
+    and body.get("verdictSummary", {}).get("overtimeCoordinates") == [{"row": 0, "col": 2}],
+)
+
+print("== 通行实测：非法目标值 422 且不产生实测记录 ==")
+for bad_target in (0, 3601, 3.0, "60", True, None):
+    code, bad_body = request(
+        f"{API}/api/walk-trials", {"path": walk_path, "targetSeconds": bad_target}
+    )
+    check(
+        f"目标 {bad_target!r} 返回 422 且定位 targetSeconds",
+        code == 422
+        and any(e.get("field") == "targetSeconds" for e in bad_body.get("detail", []))
+        and "id" not in bad_body,
+    )
+
+print("== 通行实测：省略目标值的旧契约不变（无判定与汇总） ==")
+status, body = request(f"{API}/api/walk-trials", {"path": walk_path})
+check(
+    "省略目标创建：targetSeconds/verdictSummary 均为 null",
+    status == 200 and body.get("targetSeconds") is None and body.get("verdictSummary") is None,
+)
+legacy_id = body.get("id")
+status, body = request(f"{API}/api/walk-trials/{legacy_id}/advance", {"seconds": 10})
+check(
+    "省略目标推进：分段无判定、无汇总",
+    status == 200
+    and body.get("segments", [{}])[0].get("verdict") is None
+    and body.get("verdictSummary") is None,
+)
+
 print("== 通行实测经 web /api 代理同样可用 ==")
 status, body = request(f"{WEB}/api/walk-trials", {"path": walk_path})
 check("经 web 代理创建实测成功", status == 200 and body.get("nextCoordinate") is not None)
