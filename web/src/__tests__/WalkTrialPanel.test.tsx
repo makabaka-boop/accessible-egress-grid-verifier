@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { WalkTrialPanel } from "../components/WalkTrialPanel";
 
 const PATH_3 = [
@@ -34,6 +34,17 @@ function jsonResponse(body: unknown, status = 200) {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+function deferredResponse(body: unknown, status = 200) {
+  let resolve!: (response: Response) => void;
+  const promise = new Promise<Response>((res) => {
+    resolve = res;
+  });
+  return {
+    promise,
+    resolve: () => resolve(jsonResponse(body, status)),
+  };
 }
 
 beforeEach(() => {
@@ -93,14 +104,14 @@ describe("WalkTrialPanel", () => {
     expect(JSON.parse(createInit.body)).toEqual({ path: PATH_3 });
     expect(screen.getByTestId("walk-next").textContent).toBe("(0, 1)");
     expect(screen.getByTestId("walk-elapsed").textContent).toBe("0");
-    expect(screen.getByTestId("walk-percent").textContent).toContain("0/2");
+    expect(screen.getByTestId("walk-percent").textContent).toBe("已确认 0/2 段 · 0%");
 
     // 第一段：10 秒
     fireEvent.change(screen.getByTestId("walk-seconds-input"), { target: { value: "10" } });
     fireEvent.click(screen.getByTestId("walk-advance-button"));
     await waitFor(() => expect(screen.getByTestId("walk-elapsed").textContent).toBe("10"));
     expect(screen.getByTestId("walk-next").textContent).toBe("(0, 2)");
-    expect(screen.getByTestId("walk-percent").textContent).toContain("1/2");
+    expect(screen.getByTestId("walk-percent").textContent).toBe("已确认 1/2 段 · 50%");
     const [advanceUrl1, advanceInit1] = fetchMock.mock.calls[1];
     expect(advanceUrl1).toBe("/api/walk-trials/abc123/advance");
     expect(JSON.parse(advanceInit1.body)).toEqual({ seconds: 10 });
@@ -110,7 +121,7 @@ describe("WalkTrialPanel", () => {
     fireEvent.click(screen.getByTestId("walk-advance-button"));
     await waitFor(() => expect(screen.getByTestId("walk-locked")).toBeTruthy());
     expect(screen.getByTestId("walk-total").textContent).toBe("35");
-    expect(screen.getByTestId("walk-percent").textContent).toContain("2/2");
+    expect(screen.getByTestId("walk-percent").textContent).toBe("已确认 2/2 段 · 100%");
     // 完成后不再显示推进输入与按钮
     expect(screen.queryByTestId("walk-seconds-input")).toBeNull();
     expect(screen.queryByTestId("walk-advance-button")).toBeNull();
@@ -136,6 +147,75 @@ describe("WalkTrialPanel", () => {
     fireEvent.click(screen.getByTestId("walk-advance-button"));
     expect(screen.getByTestId("walk-errors").textContent).toContain("整数");
     expect(fetchMock.mock.calls.length).toBe(callsAfterStart);
+  });
+
+  it("推进请求未返回时连续回车：只提交当前一段一次", async () => {
+    const pending = deferredResponse(
+      progress({
+        checkpoint: 1,
+        nextCoordinate: { row: 0, col: 2 },
+        elapsedSeconds: 10,
+        progressPercent: 50,
+        remainingSteps: 1,
+        segments: [{ step: 1, row: 0, col: 1, seconds: 10 }],
+      })
+    );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(progress()))
+      .mockImplementationOnce(() => pending.promise);
+    vi.stubGlobal("fetch", fetchMock);
+    render(<WalkTrialPanel snapshot={PATH_3} />);
+
+    fireEvent.click(screen.getByTestId("walk-start-button"));
+    await waitFor(() => expect(screen.getByTestId("walk-running")).toBeTruthy());
+
+    const input = screen.getByTestId("walk-seconds-input");
+    fireEvent.change(input, { target: { value: "10" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(fetchMock.mock.calls.length).toBe(2);
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ seconds: 10 });
+    expect((screen.getByTestId("walk-advance-button") as HTMLButtonElement).disabled).toBe(true);
+
+    await act(async () => pending.resolve());
+    await waitFor(() => expect(screen.getByTestId("walk-elapsed").textContent).toBe("10"));
+    expect(fetchMock.mock.calls.length).toBe(2);
+    expect(screen.getByTestId("walk-percent").textContent).toContain("1/2");
+  });
+
+  it("等待推进响应时预填下一段：响应到达后保留尚未提交的输入", async () => {
+    const pending = deferredResponse(
+      progress({
+        checkpoint: 1,
+        nextCoordinate: { row: 0, col: 2 },
+        elapsedSeconds: 10,
+        progressPercent: 50,
+        remainingSteps: 1,
+        segments: [{ step: 1, row: 0, col: 1, seconds: 10 }],
+      })
+    );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(progress()))
+      .mockImplementationOnce(() => pending.promise);
+    vi.stubGlobal("fetch", fetchMock);
+    render(<WalkTrialPanel snapshot={PATH_3} />);
+
+    fireEvent.click(screen.getByTestId("walk-start-button"));
+    await waitFor(() => expect(screen.getByTestId("walk-running")).toBeTruthy());
+
+    const input = screen.getByTestId("walk-seconds-input") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "10" } });
+    fireEvent.click(screen.getByTestId("walk-advance-button"));
+    fireEvent.change(input, { target: { value: "20" } });
+    expect(input.value).toBe("20");
+
+    await act(async () => pending.resolve());
+    await waitFor(() => expect(screen.getByTestId("walk-elapsed").textContent).toBe("10"));
+    expect(input.value).toBe("20");
+    expect(screen.getByTestId("walk-next").textContent).toBe("(0, 2)");
   });
 
   it("推进返回 422（如完成后继续推进）：字段级错误留在实测面板，进度不清空", async () => {
@@ -305,6 +385,10 @@ describe("WalkTrialPanel", () => {
     // 用户填写值保留，便于修正后重试
     expect(input.value).toBe("0");
 
+    fireEvent.change(input, { target: { value: "15" } });
+    expect(screen.queryByTestId("walk-errors")).toBeNull();
+    expect(input.getAttribute("aria-invalid")).toBe("false");
+
     fireEvent.change(input, { target: { value: "abc" } });
     fireEvent.click(screen.getByTestId("walk-start-button"));
     expect(screen.getByTestId("walk-errors").textContent).toContain("整数");
@@ -331,6 +415,10 @@ describe("WalkTrialPanel", () => {
     // 未进入运行态，已填写的目标值保留，可修正后重试
     expect(screen.queryByTestId("walk-running")).toBeNull();
     expect(input.value).toBe("30");
+
+    fireEvent.change(input, { target: { value: "15" } });
+    expect(screen.queryByTestId("walk-errors")).toBeNull();
+    expect(input.getAttribute("aria-invalid")).toBe("false");
   });
 
   it("留空目标：创建请求不携带 targetSeconds，不显示判定汇总", async () => {

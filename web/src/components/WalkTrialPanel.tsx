@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { Cell, FieldError, WalkTrialProgress } from "../types";
 import { ApiError, advanceWalkTrial, createWalkTrial } from "../lib/api";
 
@@ -38,32 +38,52 @@ export function WalkTrialPanel({ snapshot }: WalkTrialPanelProps) {
   const [targetInput, setTargetInput] = useState("");
   const [errors, setErrors] = useState<FieldError[]>([]);
   const [busy, setBusy] = useState(false);
+  // busy 的状态更新在同一事件轮内尚未刷新；ref 用于同步拦截连按回车。
+  const requestInFlight = useRef(false);
+  // 记录请求发出后用户是否又编辑过秒数，避免响应返回时清空尚未提交的下一段。
+  const secondsDraftDirty = useRef(false);
+
+  function isValidSecondsInput(value: string): boolean {
+    const trimmed = value.trim();
+    if (!/^-?\d+$/.test(trimmed)) return false;
+    const seconds = Number(trimmed);
+    return seconds >= MIN_SECONDS && seconds <= MAX_SECONDS;
+  }
+
+  function dismissFieldError(field: string) {
+    setErrors((prev) => prev.filter((err) => err.field !== field));
+  }
 
   /**解析可选目标输入：空 → 不携带；非法 → 面板内报错且不发起请求。 */
-  function parseTargetInput(): { ok: boolean; target?: number } {
+  function parseTargetInput(): { ok: true; target?: number } | { ok: false; error: FieldError } {
     const trimmed = targetInput.trim();
     if (trimmed === "") {
       return { ok: true };
     }
     if (!/^-?\d+$/.test(trimmed)) {
-      setErrors([
-        { field: "targetSeconds", message: `目标秒数必须是 ${MIN_SECONDS} 至 ${MAX_SECONDS} 之间的整数` },
-      ]);
-      return { ok: false };
+      return {
+        ok: false,
+        error: { field: "targetSeconds", message: `目标秒数必须是 ${MIN_SECONDS} 至 ${MAX_SECONDS} 之间的整数` },
+      };
     }
     const target = Number(trimmed);
     if (target < MIN_SECONDS || target > MAX_SECONDS) {
-      setErrors([
-        { field: "targetSeconds", message: `目标秒数必须在 ${MIN_SECONDS} 至 ${MAX_SECONDS} 之间，当前为 ${target}` },
-      ]);
-      return { ok: false };
+      return {
+        ok: false,
+        error: { field: "targetSeconds", message: `目标秒数必须在 ${MIN_SECONDS} 至 ${MAX_SECONDS} 之间，当前为 ${target}` },
+      };
     }
     return { ok: true, target };
   }
 
   async function handleStart() {
+    if (requestInFlight.current) return;
     const parsed = parseTargetInput();
-    if (!parsed.ok) return;
+    if (!parsed.ok) {
+      setErrors([parsed.error]);
+      return;
+    }
+    requestInFlight.current = true;
     setBusy(true);
     setErrors([]);
     try {
@@ -79,6 +99,7 @@ export function WalkTrialPanel({ snapshot }: WalkTrialPanelProps) {
           : [{ field: "__network__", message: "发起实测失败，请重试" }]
       );
     } finally {
+      requestInFlight.current = false;
       setBusy(false);
     }
   }
@@ -102,15 +123,21 @@ export function WalkTrialPanel({ snapshot }: WalkTrialPanelProps) {
   }
 
   async function handleAdvance() {
-    if (!progress || progress.completed) return;
+    if (requestInFlight.current || !progress || progress.completed) return;
     const seconds = validateSeconds(secondsInput);
     if (seconds === null) return;
+
+    requestInFlight.current = true;
+    secondsDraftDirty.current = false;
     setBusy(true);
     setErrors([]);
     try {
       const next = await advanceWalkTrial(progress.id, seconds);
       setProgress(next);
-      setSecondsInput("");
+      // 等待期间若已预填下一段，响应到达时必须保留该未提交内容。
+      if (!secondsDraftDirty.current) {
+        setSecondsInput("");
+      }
     } catch (err) {
       setErrors(
         err instanceof ApiError
@@ -118,6 +145,7 @@ export function WalkTrialPanel({ snapshot }: WalkTrialPanelProps) {
           : [{ field: "__network__", message: "推进检查点失败，请重试" }]
       );
     } finally {
+      requestInFlight.current = false;
       setBusy(false);
     }
   }
@@ -146,7 +174,13 @@ export function WalkTrialPanel({ snapshot }: WalkTrialPanelProps) {
               aria-invalid={errors.some((e) => e.field === "targetSeconds")}
               data-testid="walk-target-input"
               placeholder="留空则不判定"
-              onChange={(e) => setTargetInput(e.target.value)}
+              onChange={(e) => {
+                const value = e.target.value;
+                setTargetInput(value);
+                if (value.trim() === "" || isValidSecondsInput(value)) {
+                  dismissFieldError("targetSeconds");
+                }
+              }}
             />
           </label>
           <p className="result-note">
@@ -194,7 +228,7 @@ export function WalkTrialPanel({ snapshot }: WalkTrialPanelProps) {
                   <strong data-testid="walk-elapsed">{progress.elapsedSeconds}</strong> 秒
                 </p>
                 <p className="result-line result-note">
-                  剩余 {progress.remainingSteps} 格（共 {progress.totalSteps} 段）
+                  剩余 {progress.remainingSteps} 段（共 {progress.totalSteps} 段）
                 </p>
               </>
             )}
@@ -214,7 +248,7 @@ export function WalkTrialPanel({ snapshot }: WalkTrialPanelProps) {
               style={{ width: `${progress.progressPercent}%` }}
             />
             <span className="walk-progress-text" data-testid="walk-percent">
-              {progress.checkpoint}/{progress.totalSteps} 格 · {progress.progressPercent}%
+              已确认 {progress.checkpoint}/{progress.totalSteps} 段 · {progress.progressPercent}%
             </span>
           </div>
 
@@ -258,7 +292,14 @@ export function WalkTrialPanel({ snapshot }: WalkTrialPanelProps) {
                   aria-label="到达下一格所用秒数"
                   aria-invalid={errors.some((e) => e.field === "seconds")}
                   data-testid="walk-seconds-input"
-                  onChange={(e) => setSecondsInput(e.target.value)}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setSecondsInput(value);
+                    secondsDraftDirty.current = requestInFlight.current;
+                    if (isValidSecondsInput(value)) {
+                      dismissFieldError("seconds");
+                    }
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") handleAdvance();
                   }}
